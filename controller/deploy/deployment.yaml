@@ -1,0 +1,71 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homelab-ingress-controller
+  namespace: homelab-ingress
+  labels:
+    app: homelab-ingress-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: homelab-ingress-controller
+  template:
+    metadata:
+      labels:
+        app: homelab-ingress-controller
+    spec:
+      serviceAccountName: homelab-ingress-controller
+      containers:
+      - name: controller
+        image: ghcr.io/vranyes/homelab-ingress/controller@sha256:559ae6603750261569a0db9b0ee0d48519eb122a5dc347f85316146511e75937
+        args:
+        - --router-addr=$(ROUTER_ADDR)
+        - --poll-interval=$(POLL_INTERVAL)
+        - --metrics-addr=:8080
+        - --token-path=/var/run/secrets/homelab-ingress/token
+        env:
+        - name: ROUTER_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: homelab-ingress-config
+              key: router-addr
+        - name: POLL_INTERVAL
+          valueFrom:
+            configMapKeyRef:
+              name: homelab-ingress-config
+              key: poll-interval
+        ports:
+        - name: metrics
+          containerPort: 8080
+        # livenessProbe:
+        #   httpGet:
+        #     path: /healthz
+        #     port: 8081
+        #   initialDelaySeconds: 15
+        #   periodSeconds: 20
+        # readinessProbe:
+        #   httpGet:
+        #     path: /readyz
+        #     port: 8081
+        #   initialDelaySeconds: 5
+        #   periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 64Mi
+        volumeMounts:
+        - name: router-token
+          mountPath: /var/run/secrets/homelab-ingress
+          readOnly: true
+      volumes:
+      - name: router-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+              audience: homelab-ingress-ingress

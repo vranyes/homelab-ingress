@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "gograph": {
+      "type": "local",
+      "command": ["gograph", "mcp", "."],
+      "enabled": true
+    }
+  }
+}

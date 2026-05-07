@@ -1,0 +1,71 @@
+syntax = "proto3";
+package router.v1;
+option go_package = "github.com/vranyes/homelab-ingress/ingress/pkg/api/router/v1;routerv1";
+
+service RouterService {
+  rpc CreateLoadBalancer(CreateLoadBalancerRequest) returns (CreateLoadBalancerResponse);
+  rpc UpdateLoadBalancer(UpdateLoadBalancerRequest) returns (UpdateLoadBalancerResponse);
+  rpc DeleteLoadBalancer(DeleteLoadBalancerRequest) returns (DeleteLoadBalancerResponse);
+  rpc GetLoadBalancer(GetLoadBalancerRequest) returns (GetLoadBalancerResponse);
+  rpc ListLoadBalancers(ListLoadBalancersRequest) returns (ListLoadBalancersResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message PortMapping {
+  string protocol = 1;
+  int32 src_port = 2;
+  repeated Destination dst = 3;
+}
+
+message Destination {
+  int32 port = 1;
+  string addr = 2;
+}
+
+message CreateLoadBalancerRequest {
+  string service_key = 1;
+  repeated PortMapping ports = 2;
+}
+
+message CreateLoadBalancerResponse {
+  string assigned_ip = 1;
+}
+
+message UpdateLoadBalancerRequest {
+  string service_key = 1;
+  repeated PortMapping ports = 2;
+}
+
+message UpdateLoadBalancerResponse {}
+
+message DeleteLoadBalancerRequest {
+  string service_key = 1;
+}
+
+message DeleteLoadBalancerResponse {}
+
+message GetLoadBalancerRequest {
+  string service_key = 1;
+}
+
+message GetLoadBalancerResponse {
+  string service_key = 1;
+  string assigned_ip = 2;
+  repeated PortMapping ports = 3;
+  bool dhcp_acquired = 4;
+  string interface_name = 5;
+}
+
+message ListLoadBalancersRequest {}
+
+message ListLoadBalancersResponse {
+  repeated GetLoadBalancerResponse load_balancers = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string base_interface = 2;
+  int32 active_macvlans = 3;
+}

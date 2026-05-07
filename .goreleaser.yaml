@@ -1,0 +1,83 @@
+---
+builds:
+- binary: controller
+  env:
+  - CGO_ENABLED=0
+  flags:
+  - '-trimpath'
+  goarch:
+  - arm64
+  - amd64
+  goos:
+  - darwin
+  - linux
+  id: controller
+  ldflags:
+  - '-s -w'
+  main: ./controller/cmd/controller
+- binary: ingress
+  env:
+  - CGO_ENABLED=0
+  flags:
+  - '-trimpath'
+  goarch:
+  - arm64
+  - amd64
+  goos:
+  - darwin
+  - linux
+  id: ingress
+  ldflags:
+  - '-s -w'
+  main: ./ingress/cmd/ingress
+- binary: ingress-cli
+  env:
+  - CGO_ENABLED=0
+  flags:
+  - '-trimpath'
+  goarch:
+  - arm64
+  - amd64
+  goos:
+  - darwin
+  - linux
+  id: ingress-cli
+  ldflags:
+  - '-s -w'
+  main: ./ingress/cmd/cli
+kos:
+- build: controller
+  id: controller
+  platforms:
+  - linux/amd64
+  - linux/arm64
+  repositories:
+  - ghcr.io/vranyes/homelab-ingress/controller
+  tags:
+  - '{{.Commit}}'
+  - v{{.Tag}}
+nfpms:
+- contents:
+  - dst: /etc/init.d/homelab-ingress
+    file_info:
+      mode: 700
+    src: files/homelab-ingress.init
+  - dst: /etc/config/homelab-ingress
+    src: files/homelab-ingress.config
+  formats:
+  - apk
+  id: ingress-openwrt-cortex-a53
+  ids:
+  - ingress
+  maintainer: Josiah Vranyes
+  package_name: homelab-loadbalancer-ingress
+  recommends: []
+  suggests: []
+  conflicts: []
+  replaces: []
+  dependencies:
+  - procd
+  - uci
+
+project_name: homelab-loadbalancer
+version: 2

@@ -1,0 +1,17 @@
+---
+# auth:
+#   allowed_subjects:
+#   # Can set to service account workload is running as if using Kubernetes service account tokens for authentication.
+#   - system:serviceaccount:homelab-ingress:homelab-ingress-controller
+#   # Or if you are using some other OIDC provider, use the appropriate subject.
+#   - some-other-subject
+#   # client token has to match this if it is set.
+#   audience: homelab-ingress-service
+#   # issuer can be Kubernetes cluster.
+#   # workload simply uses its service account token to authenticate.
+#   issuer: https://myoidcissuer.local:6443
+# base_interface must be set
+base_interface: wan
+# grpc:
+#   # Default is 0.0.0.0:50051
+#   listen: 0.0.0.0:50051
