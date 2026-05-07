@@ -1,0 +1,17 @@
+defaultBaseImage: gcr.io/distroless/static:nonroot
+
+builds:
+  - id: controller
+    importpath: github.com/vranyes/homelab-ingress/controller/cmd/controller
+    dir: ./controller
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -extldflags "-static"
+    linux:
+      platforms:
+        - linux/arm64
+        - linux/amd64

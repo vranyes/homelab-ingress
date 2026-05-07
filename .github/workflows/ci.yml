@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        module: [router, controller]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Run tests
+        working-directory: ${{ matrix.module }}
+        run: go test ./internal/... -cover -v
+
+  build:
+    name: Build controller image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: ko-build/setup-ko@v0.2
+
+      - name: Build and push
+        env:
+          KO_DOCKER_REPO: ghcr.io/vranyes/homelab-ingress/controller
+        run: ko build ./controller/cmd/controller/ --bare --platform=linux/arm64,linux/amd64 --push
