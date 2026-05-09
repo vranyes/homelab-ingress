@@ -13,9 +13,13 @@ service RouterService {
 
 message PortMapping {
   string protocol = 1;
-  int32 external_port = 2;
-  int32 pod_port = 3;
-  repeated string pod_ips = 4;
+  int32 src_port = 2;
+  repeated Destination dst = 3;
+}
+
+message Destination {
+  int32 port = 1;
+  string addr = 2;
 }
 
 message CreateLoadBalancerRequest {

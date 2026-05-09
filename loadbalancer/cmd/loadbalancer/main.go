@@ -16,10 +16,7 @@ import (
 
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/auth"
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/config"
-	"github.com/vranyes/homelab-ingress/loadbalancer/internal/dhcp"
-	"github.com/vranyes/homelab-ingress/loadbalancer/internal/firewall"
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/macvlan"
-	"github.com/vranyes/homelab-ingress/loadbalancer/internal/recovery"
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/service"
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/state"
 	routerv1 "github.com/vranyes/homelab-ingress/loadbalancer/pkg/api/router/v1"
@@ -45,38 +42,33 @@ func main() {
 		logger.Error("failed to load state", "error", err)
 		os.Exit(1)
 	}
+	st.UpdateCh = make(chan state.LBNotification)
 
-	linkMgr := macvlan.NewNetlinkManagerWithLogger(logger)
-	fwMgr := firewall.NewManagerWithLogger(logger)
+	linkMgr := macvlan.NewNetlinkManagerWithLogger(st, logger)
+	go linkMgr.Run(st.UpdateCh)
 
 	// Create DHCP manager with factory that updates firewall rules on IP change
-	dhcpMgr := dhcp.NewManagerWithFactoryAndLogger(
-		func(iface string, ip net.IP) {
-			key := ifaceToServiceKey(st, iface)
-			if key == "" {
-				logger.Warn("could not find service key for interface", "interface", iface)
-				return
-			}
+	// dhcpMgr := dhcp.NewManagerWithFactoryAndLogger(
+	// 	func(iface string, ip net.IP) {
+	// 		key := ifaceToServiceKey(st, iface)
+	// 		if key == "" {
+	// 			logger.Warn("could not find service key for interface", "interface", iface)
+	// 			return
+	// 		}
 
-			// Update state with new IP
-			state.UpdateIP(st, key, ip.String())
-			if err := store.Save(st); err != nil {
-				logger.Error("failed to persist IP change", "service", key, "ip", ip.String(), "error", err)
-			}
-		},
-		func(iface string, mac net.HardwareAddr, onChange dhcp.IPChangeFunc) dhcp.Client {
-			return dhcp.NewRealClientWithLogger(iface, mac, onChange, logger)
-		},
-		logger,
-	)
-
-	if err := recovery.Run(logger, st, linkMgr, dhcpMgr, fwMgr); err != nil {
-		logger.Error("startup recovery failed", "error", err)
-		os.Exit(1)
-	}
+	// 		// Update state with new IP
+	// 		state.UpdateIP(st, key, ip)
+	// 	},
+	// 	func(iface string, mac net.HardwareAddr, onChange dhcp.IPChangeFunc) dhcp.Client {
+	// 		return dhcp.NewRealClientWithLogger(iface, mac, onChange, logger)
+	// 	},
+	// 	logger,
+	// )
+	// dhcpMgr.Watch()
+	// defer dhcpMgr.StopAll()
 
 	// reuse the same store instance created earlier
-	srv := service.NewRouterServerWithLogger(cfg.BaseInterface, linkMgr, dhcpMgr, fwMgr, store, st, logger)
+	srv := service.NewRouterServerWithLogger(store, st, logger)
 
 	listener, err := net.Listen("tcp", cfg.GRPC.Listen)
 	if err != nil {
@@ -114,7 +106,6 @@ func main() {
 	logger.Info("received signal, shutting down", "signal", sig)
 
 	grpcServer.GracefulStop()
-	dhcpMgr.StopAll()
 	logger.Info("shutdown complete")
 }
 

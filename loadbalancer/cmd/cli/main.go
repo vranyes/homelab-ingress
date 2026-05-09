@@ -272,7 +272,9 @@ func printService(lb *routerv1.GetLoadBalancerResponse) {
 	fmt.Printf("DHCP Acquired:  %v\n", lb.DhcpAcquired)
 	fmt.Println("Port Mappings:")
 	for _, p := range lb.Ports {
-		fmt.Printf("  %-5s :%d -> %s:%d\n", p.Protocol, p.ExternalPort, strings.Join(p.PodIps, ","), p.PodPort)
+		for _, q := range p.Dst {
+			fmt.Printf("  %-5s :%d -> %s:%d\n", p.Protocol, p.SrcPort, q.Addr, q.Port)
+		}
 	}
 }
 
@@ -286,8 +288,9 @@ func valueOrPending(s string) string {
 func formatPorts(ports []*routerv1.PortMapping) string {
 	parts := make([]string, len(ports))
 	for i, p := range ports {
-		ips := strings.Join(p.PodIps, ",")
-		parts[i] = fmt.Sprintf("%s:%d->%s:%d", p.Protocol, p.ExternalPort, ips, p.PodPort)
+		for _, q := range p.Dst {
+			parts[i] = fmt.Sprintf("%s:%d->%s:%d", p.Protocol, p.SrcPort, q.Addr, q.Port)
+		}
 	}
 	return strings.Join(parts, "; ")
 }
@@ -328,10 +331,12 @@ func parsePortMapping(s string) *routerv1.PortMapping {
 	}
 
 	return &routerv1.PortMapping{
-		Protocol:     parts[0],
-		ExternalPort: int32(extPort),
-		PodPort:      int32(podPort),
-		PodIps:       podIPs,
+		Protocol: parts[0],
+		SrcPort:  int32(extPort),
+		Dst: []*routerv1.Destination{{
+			Addr: strings.Join(podIPs, ","),
+			Port: int32(podPort),
+		}},
 	}
 }
 

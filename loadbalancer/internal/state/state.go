@@ -12,21 +12,38 @@ type State struct {
 	Version   int                   `json:"version"`
 	BaseIface string                `json:"base_interface"`
 	Services  map[string]*LBService `json:"services"`
+	UpdateCh  chan LBNotification   `json:"-"`
+}
+
+type LBEvent string
+
+const CreateEvent LBEvent = "create"
+const UpdateEvent LBEvent = "update"
+const DeleteEvent LBEvent = "delete"
+
+type LBNotification struct {
+	Type    LBEvent
+	Service *LBService
 }
 
 type LBService struct {
-	MACAddr      string      `json:"macaddr"`
-	Interface    string      `json:"interface"`
-	Ports        []PortEntry `json:"ports"`
-	CurrentIP    string      `json:"current_ip"`
-	DHCPAcquired bool        `json:"dhcp_acquired"`
+	ServiceName   string           `json:"service_name"`
+	Interface     string           `json:"interface"`
+	MACAddr       net.HardwareAddr `json:"macaddr"`
+	DHCPAcquired  bool             `json:"dhcp_acquired"`
+	SourceAddress net.IP           `json:"source_address"`
+	Targets       []LBTarget       `json:"targets"`
 }
 
-type PortEntry struct {
-	Protocol     string   `json:"protocol"`
-	ExternalPort int      `json:"external_port"`
-	PodPort      int      `json:"pod_port"`
-	PodIPs       []string `json:"pod_ips"`
+type LBTarget struct {
+	Protocol string          `json:"protocol"`
+	SrcPort  int             `json:"external_port"`
+	Dst      []LBDestination `json:"destinations"`
+}
+
+type LBDestination struct {
+	Port    int    `json:"port"`
+	Address net.IP `json:"address,omitempty"`
 }
 
 func NewState(baseIface string) *State {
@@ -34,15 +51,16 @@ func NewState(baseIface string) *State {
 		Version:   StateVersion,
 		BaseIface: baseIface,
 		Services:  make(map[string]*LBService),
+		UpdateCh:  make(chan LBNotification),
 	}
 }
 
 func (s *LBService) ParseMAC() (net.HardwareAddr, error) {
-	return net.ParseMAC(s.MACAddr)
+	return s.MACAddr, nil
 }
 
 func (s *LBService) SetMAC(mac net.HardwareAddr) {
-	s.MACAddr = mac.String()
+	s.MACAddr = mac
 }
 
 // Clone returns a deep copy of the state suitable for callers that want
@@ -65,54 +83,26 @@ func (s *State) Clone() *State {
 			continue
 		}
 		svcCopy := &LBService{
-			MACAddr:      v.MACAddr,
-			Interface:    v.Interface,
-			CurrentIP:    v.CurrentIP,
-			DHCPAcquired: v.DHCPAcquired,
-			Ports:        make([]PortEntry, len(v.Ports)),
+			Interface:     v.Interface,
+			MACAddr:       v.MACAddr,
+			DHCPAcquired:  v.DHCPAcquired,
+			SourceAddress: v.SourceAddress,
+			Targets:       make([]LBTarget, len(v.Targets)),
 		}
-		for i, p := range v.Ports {
-			svcCopy.Ports[i] = PortEntry{
-				Protocol:     p.Protocol,
-				ExternalPort: p.ExternalPort,
-				PodPort:      p.PodPort,
-				PodIPs:       append([]string(nil), p.PodIPs...),
+		for i, p := range v.Targets {
+			svcCopy.Targets[i] = LBTarget{
+				Protocol: p.Protocol,
+				SrcPort:  p.SrcPort,
+				Dst:      make([]LBDestination, len(p.Dst)),
+			}
+			for j, d := range p.Dst {
+				svcCopy.Targets[i].Dst[j] = LBDestination{
+					Port:    d.Port,
+					Address: d.Address,
+				}
 			}
 		}
 		copyState.Services[k] = svcCopy
 	}
 	return copyState
-}
-
-func PortsEqual(a, b []PortEntry) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !portEntryEqual(&a[i], &b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func portEntryEqual(a, b *PortEntry) bool {
-	if a.Protocol != b.Protocol {
-		return false
-	}
-	if a.ExternalPort != b.ExternalPort {
-		return false
-	}
-	if a.PodPort != b.PodPort {
-		return false
-	}
-	if len(a.PodIPs) != len(b.PodIPs) {
-		return false
-	}
-	for i := range a.PodIPs {
-		if a.PodIPs[i] != b.PodIPs[i] {
-			return false
-		}
-	}
-	return true
 }

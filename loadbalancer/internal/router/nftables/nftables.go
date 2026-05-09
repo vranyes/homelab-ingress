@@ -1,6 +1,6 @@
 //go:build linux
 
-package firewall
+package nftables
 
 import (
 	"encoding/binary"
@@ -13,38 +13,9 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+	"github.com/vranyes/homelab-ingress/loadbalancer/internal/state"
 	"golang.org/x/sys/unix"
 )
-
-const tableName = "homelab_lb"
-
-// PortRule describes a single external-port → pod DNAT mapping.
-type PortRule struct {
-	ExtPort  int
-	Protocol string
-	PodIPs   []string
-	PodPort  int
-}
-
-// ingressChainName converts a service key to a valid nftables chain name.
-func ingressChainName(serviceKey string) string {
-	safe := strings.ReplaceAll(serviceKey, "/", "_")
-	safe = strings.ReplaceAll(safe, "-", "_")
-	if len(safe) > 30 {
-		safe = safe[:30]
-	}
-	return "ingress_" + safe
-}
-
-// forwardChainName converts a service key to a valid nftables chain name.
-func forwardChainName(serviceKey string) string {
-	safe := strings.ReplaceAll(serviceKey, "/", "_")
-	safe = strings.ReplaceAll(safe, "-", "_")
-	if len(safe) > 30 {
-		safe = safe[:30]
-	}
-	return "forward_" + safe
-}
 
 // Manager owns a nftables connection and applies load-balancer NAT rules.
 type Manager struct {
@@ -78,22 +49,34 @@ func newManagerWithConn(conn *nftables.Conn, logger *slog.Logger) *Manager {
 	return &Manager{conn: conn, logger: logger}
 }
 
-// AddServiceRules installs DNAT rules for all ports of a service atomically.
+func (m *Manager) ListRules() ([]string, error) {
+	if m.conn == nil {
+		return nil, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	table, err := m.findTable()
+	if err != nil {
+		return nil, fmt.Errorf("find table: %w", err)
+	}
+	if table == nil {
+		return nil, nil
+	}
+
+	var services []string
+	return services, nil
+}
+
+// AddRules installs DNAT rules for all ports of a service atomically.
 // A single chain is created for the service and rules for every port are added
 // in one Flush call, preventing the overwrite issue that occurs when AddRules
 // is called in a loop (each call would delete and recreate the chain).
-func (m *Manager) AddServiceRules(iface, extIP string, ports []PortRule, serviceKey string) error {
-	m.logger.Info("adding firewall rules", "service", serviceKey, "iface", iface, "ports", len(ports))
-	if len(extIP) == 0 {
-		return fmt.Errorf("external IP is required")
-	}
-	if len(ports) == 0 {
-		return fmt.Errorf("no ports provided")
-	}
-	for _, p := range ports {
-		if len(p.PodIPs) == 0 {
-			return fmt.Errorf("no pod IPs provided for ext_port %d", p.ExtPort)
-		}
+func (m *Manager) AddRules(service state.LBService) error {
+	m.logger.Info("adding firewall rules", "service", service.ServiceName)
+	if err := validateService(service); err != nil {
+		return err
 	}
 	if m.conn == nil {
 		return nil
@@ -110,18 +93,18 @@ func (m *Manager) AddServiceRules(iface, extIP string, ports []PortRule, service
 		return fmt.Errorf("ensure postrouting: %w", err)
 	}
 
-	chain := ingressChainName(serviceKey)
+	chainIngress := chainName("ingress", service.ServiceName)
+	chainForward := chainName("forward", service.ServiceName)
 
 	// Remove existing chains once before recreating with all rules.
-	_ = m.removeServiceChain(table, chain)
-	_ = m.removeServiceChain(table, forwardChainName(serviceKey))
+	_ = m.removeServiceChain(table, chainIngress)
+	_ = m.removeServiceChain(table, chainForward)
 
-	// Priority -110: runs before inet fw4's dstnat chain (-100).
-	prio := nftables.ChainPriorityRef(-110)
+	prio := nftables.ChainPriorityRef(priority)
 	policy := nftables.ChainPolicyAccept
 	svcChain := m.conn.AddChain(&nftables.Chain{
 		Table:    table,
-		Name:     chain,
+		Name:     chainIngress,
 		Type:     nftables.ChainTypeNAT,
 		Hooknum:  nftables.ChainHookPrerouting,
 		Priority: prio,
@@ -131,39 +114,40 @@ func (m *Manager) AddServiceRules(iface, extIP string, ports []PortRule, service
 	// Create a forward filter chain for post-DNAT acceptance of pod IPs/ports.
 	// Priority -10: runs early in forward hook.
 	fwdPrio := nftables.ChainPriorityRef(-10)
-	fwdChainName := forwardChainName(serviceKey)
 	fwdChain := m.conn.AddChain(&nftables.Chain{
 		Table:    table,
-		Name:     fwdChainName,
+		Name:     chainForward,
 		Type:     nftables.ChainTypeFilter,
 		Hooknum:  nftables.ChainHookForward,
 		Priority: fwdPrio,
 		Policy:   &policy,
 	})
 
+	extIP := service.SourceAddress.String()
+
 	// Add one nftables rule per port to the same chain in a single batch.
-	for i, port := range ports {
-		exprs := matchExprs(iface, extIP, port.ExtPort, port.Protocol)
-		if len(port.PodIPs) == 1 {
-			exprs = append(exprs, dnatSingleExprs(port.PodIPs[0], port.PodPort)...)
+	for i, port := range service.Targets {
+		exprs := matchExprs(extIP, port.SrcPort, port.Protocol)
+		if len(port.Dst) == 1 {
+			exprs = append(exprs, dnatSingleExprs(port.Dst[0].Address, port.Dst[0].Port)...)
 		} else {
-			setName := fmt.Sprintf("lb_%s_%d", chain, i)
-			_, lookupExprs, err := m.addLBMapNamed(table, setName, port.PodIPs, port.PodPort)
+			setName := fmt.Sprintf("lb_%s_%d", chainIngress, i)
+			_, lookupExprs, err := m.addLBMapNamed(table, setName, port.Dst, port.DstPort)
 			if err != nil {
-				return fmt.Errorf("build LB map for ext_port %d: %w", port.ExtPort, err)
+				return fmt.Errorf("build LB map for ext_port %d: %w", port.SrcPort, err)
 			}
 			exprs = append(exprs, lookupExprs...)
 		}
 		m.conn.AddRule(&nftables.Rule{Table: table, Chain: svcChain, Exprs: exprs})
 
 		// Also add forward-chain accept rules for the (post-DNAT) pod IP(s)/pod port.
-		if len(port.PodIPs) == 1 {
-			fwdExprs := append(matchIPDstExprs(port.PodIPs[0]), matchProtoPortExprs(port.Protocol, port.PodPort)...)
+		if len(port.Dst) == 1 {
+			fwdExprs := append(matchIPDstExprs(port.Dst[0].Address), matchProtoPortExprs(port.Protocol, port.Dst[0].Port)...)
 			fwdExprs = append(fwdExprs, []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}...)
 			m.conn.AddRule(&nftables.Rule{Table: table, Chain: fwdChain, Exprs: fwdExprs})
 		} else {
-			for _, podIP := range port.PodIPs {
-				fwdExprs := append(matchIPDstExprs(podIP), matchProtoPortExprs(port.Protocol, port.PodPort)...)
+			for _, podIP := range port.Dst {
+				fwdExprs := append(matchIPDstExprs(podIP.Address), matchProtoPortExprs(port.Protocol, podIP.Port)...)
 				fwdExprs = append(fwdExprs, []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}...)
 				m.conn.AddRule(&nftables.Rule{Table: table, Chain: fwdChain, Exprs: fwdExprs})
 			}
@@ -174,7 +158,7 @@ func (m *Manager) AddServiceRules(iface, extIP string, ports []PortRule, service
 	if err := m.conn.Flush(); err != nil {
 		return fmt.Errorf("flush: %w", err)
 	}
-	m.logger.Info("firewall rules applied", "service", serviceKey)
+	m.logger.Info("firewall rules applied", "service", service.ServiceName)
 	return nil
 }
 
@@ -194,27 +178,9 @@ func (m *Manager) RemoveRules(serviceKey string) error {
 	}
 
 	return errors.Join(
-		m.removeServiceChain(table, ingressChainName(serviceKey)),
-		m.removeServiceChain(table, forwardChainName(serviceKey)),
+		m.removeServiceChain(table, chainName("ingress", serviceKey)),
+		m.removeServiceChain(table, chainName("forward", serviceKey)),
 	)
-}
-
-// RemoveAllRules deletes the entire homelab_lb table.
-func (m *Manager) RemoveAllRules() error {
-	m.logger.Info("removing all firewall rules")
-	if m.conn == nil {
-		return nil
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	table, _ := m.findTable()
-	if table == nil {
-		return nil
-	}
-	m.conn.DelTable(table)
-	return m.conn.Flush()
 }
 
 // -- internal helpers --
@@ -303,7 +269,7 @@ func (m *Manager) removeServiceChain(table *nftables.Table, chain string) error 
 
 // addLBMapNamed creates a named integer->(ipv4_addr . inet_service) map for
 // round-robin DNAT and returns the expressions to perform the lookup.
-func (m *Manager) addLBMapNamed(table *nftables.Table, setName string, podIPs []string, podPort int) (*nftables.Set, []expr.Any, error) {
+func (m *Manager) addLBMapNamed(table *nftables.Table, setName string, podIPs []net.IP, podPort int) (*nftables.Set, []expr.Any, error) {
 	dataType := nftables.MustConcatSetType(nftables.TypeIPAddr, nftables.TypeInetService)
 	set := &nftables.Set{
 		Table:    table,
@@ -315,7 +281,7 @@ func (m *Manager) addLBMapNamed(table *nftables.Table, setName string, podIPs []
 
 	elements := make([]nftables.SetElement, len(podIPs))
 	for i, ip := range podIPs {
-		parsed := net.ParseIP(ip).To4()
+		parsed := ip.To4()
 		if parsed == nil {
 			return nil, nil, fmt.Errorf("invalid pod IP %q", ip)
 		}
@@ -351,20 +317,20 @@ func (m *Manager) addLBMapNamed(table *nftables.Table, setName string, podIPs []
 // hook the kernel may still report the physical parent interface rather than the
 // MACVLAN alias, causing rules to be silently skipped. Matching on the unique
 // destination IP is sufficient and interface-agnostic.
-func matchExprs(_, extIP string, extPort int, protocol string) []expr.Any {
+func matchExprs(extIP string, extPort int, protocol string) []expr.Any {
 	var exprs []expr.Any
 	if extIP != "" {
-		exprs = append(exprs, matchIPDstExprs(extIP)...)
+		exprs = append(exprs, matchIPDstExprs(net.ParseIP(extIP))...)
 	}
 	exprs = append(exprs, matchProtoPortExprs(protocol, extPort)...)
 	return exprs
 }
 
-func matchIPDstExprs(ip string) []expr.Any {
+func matchIPDstExprs(ip net.IP) []expr.Any {
 	return []expr.Any{
 		// IPv4 header: destination address at offset 16, length 4.
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: net.ParseIP(ip).To4()},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ip.To4()},
 	}
 }
 
@@ -384,9 +350,9 @@ func matchProtoPortExprs(protocol string, port int) []expr.Any {
 	}
 }
 
-func dnatSingleExprs(ip string, port int) []expr.Any {
+func dnatSingleExprs(ip net.IP, port int) []expr.Any {
 	return []expr.Any{
-		&expr.Immediate{Register: 1, Data: net.ParseIP(ip).To4()},
+		&expr.Immediate{Register: 1, Data: ip.To4()},
 		&expr.Immediate{Register: 2, Data: bigEndianUint16(uint16(port))},
 		&expr.NAT{Type: expr.NATTypeDestNAT, Family: unix.NFPROTO_IPV4, RegAddrMin: 1, RegProtoMin: 2},
 	}

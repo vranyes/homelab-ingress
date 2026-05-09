@@ -65,7 +65,7 @@ func (s *Store) Save(st *State) error {
 
 // Package-level helpers that mutate or access State must use the package
 // mutex so concurrent callers (DHCP callbacks, gRPC handlers) don't race.
-func UpdateIP(st *State, serviceKey, ip string) {
+func UpdateIP(st *State, serviceKey string, ip net.IP) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -73,26 +73,31 @@ func UpdateIP(st *State, serviceKey, ip string) {
 	if !ok {
 		return
 	}
-	svc.CurrentIP = ip
-	if ip != "" {
+	svc.SourceAddress = ip
+	if ip != nil {
 		svc.DHCPAcquired = true
+	}
+	st.UpdateCh <- LBNotification{
+		Type:    UpdateEvent,
+		Service: svc,
 	}
 }
 
-func UpdateService(st *State, serviceKey string, mac net.HardwareAddr, iface string, ports []PortEntry) {
+func UpdateService(st *State, svc *LBService) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	svc, exists := st.Services[serviceKey]
-	if !exists {
-		svc = &LBService{
-			Interface: iface,
-		}
-		st.Services[serviceKey] = svc
+	eventType := UpdateEvent
+	_, ok := st.Services[svc.ServiceName]
+	if !ok {
+		eventType = CreateEvent
 	}
-	svc.MACAddr = mac.String()
-	svc.Interface = iface
-	svc.Ports = ports
+
+	st.Services[svc.ServiceName] = svc
+	st.UpdateCh <- LBNotification{
+		Type:    eventType,
+		Service: svc,
+	}
 }
 
 func DeleteService(st *State, serviceKey string) {
@@ -100,6 +105,10 @@ func DeleteService(st *State, serviceKey string) {
 	defer mu.Unlock()
 
 	delete(st.Services, serviceKey)
+	st.UpdateCh <- LBNotification{
+		Type:    DeleteEvent,
+		Service: &LBService{ServiceName: serviceKey},
+	}
 }
 
 func HasService(st *State, serviceKey string) bool {
