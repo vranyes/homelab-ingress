@@ -116,8 +116,8 @@ func (s *RouterServer) GetLoadBalancer(ctx context.Context, req *routerv1.GetLoa
 		ServiceKey:    req.ServiceKey,
 		AssignedIp:    svc.SourceAddress.String(),
 		Ports:         statePortsToProto(svc.Targets),
-		DhcpAcquired:  svc.DHCPAcquired,
-		InterfaceName: svc.Interface,
+		DhcpAcquired:  *svc.DHCPAcquired,
+		InterfaceName: *svc.Interface,
 	}, nil
 }
 
@@ -133,8 +133,8 @@ func (s *RouterServer) ListLoadBalancers(ctx context.Context, req *routerv1.List
 			ServiceKey:    key,
 			AssignedIp:    svc.SourceAddress.String(),
 			Ports:         statePortsToProto(svc.Targets),
-			DhcpAcquired:  svc.DHCPAcquired,
-			InterfaceName: svc.Interface,
+			DhcpAcquired:  *svc.DHCPAcquired,
+			InterfaceName: *svc.Interface,
 		})
 	}
 

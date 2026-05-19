@@ -12,7 +12,6 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
-	"github.com/vishvananda/netlink"
 )
 
 type RealClient struct {
@@ -49,7 +48,7 @@ func NewRealClientWithLogger(iface string, mac net.HardwareAddr, onChange IPChan
 }
 
 func (c *RealClient) Start() error {
-	c.logger.Info("starting DHCP client", "interface", c.iface, "mac", c.mac.String())
+	c.logger.Info("starting DHCP client", "interface", c.iface, "mac", c.mac)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
@@ -120,11 +119,11 @@ func (c *RealClient) run(ctx context.Context) {
 		c.mu.Unlock()
 
 		if changed && c.onChange != nil {
-			c.logger.Info("IP changed, calling onChange callback", "interface", c.iface, "new_ip", ip.String(), "first_acquisition", firstAcquisition)
+			c.logger.Info("IP changed, calling onChange callback", "interface", c.iface, "new_ip", ip, "first_acquisition", firstAcquisition)
 			c.onChange(c.iface, ip)
 		}
 
-		c.logger.Info("DHCP lease acquired", "interface", c.iface, "ip", ip.String())
+		c.logger.Info("DHCP lease acquired", "interface", c.iface, "ip", ip)
 
 		// Renewal loop: renew at T1 (half the lease time) using a unicast
 		// REQUEST to the server rather than re-discovering, which would cause
@@ -151,16 +150,16 @@ func (c *RealClient) run(ctx context.Context) {
 			c.mu.Unlock()
 
 			if renewalChanged && c.onChange != nil {
-				c.logger.Info("IP changed after renewal", "interface", c.iface, "new_ip", newIP.String())
+				c.logger.Info("IP changed after renewal", "interface", c.iface, "new_ip", newIP)
 				c.onChange(c.iface, newIP)
 			}
-			c.logger.Info("DHCP lease renewed", "interface", c.iface, "ip", newIP.String())
+			c.logger.Info("DHCP lease renewed", "interface", c.iface, "ip", newIP)
 		}
 	}
 }
 
 func (c *RealClient) dhcpRequest(ctx context.Context) (net.IP, error) {
-	c.logger.Info("sending DHCP discover/request", "interface", c.iface, "mac", c.mac.String())
+	c.logger.Info("sending DHCP discover/request", "interface", c.iface, "mac", c.mac)
 
 	client, err := nclient4.New(c.iface,
 		nclient4.WithTimeout(30*time.Second),
@@ -179,16 +178,11 @@ func (c *RealClient) dhcpRequest(ctx context.Context) (net.IP, error) {
 	}
 
 	ip := resp.ACK.YourIPAddr
-	c.logger.Info("DHCP ACK received", "interface", c.iface, "ip", ip.String())
+	c.logger.Info("DHCP ACK received", "interface", c.iface, "ip", ip)
 
 	c.mu.Lock()
 	c.lease = resp
 	c.mu.Unlock()
-
-	// Assign IP to interface
-	if err := c.assignIP(ip, resp.ACK); err != nil {
-		c.logger.Error("failed to assign IP to interface", "interface", c.iface, "ip", ip.String(), "error", err)
-	}
 
 	return ip, nil
 }
@@ -221,15 +215,11 @@ func (c *RealClient) dhcpRenew(ctx context.Context) (net.IP, error) {
 	}
 
 	ip := resp.ACK.YourIPAddr
-	c.logger.Info("DHCP renewal ACK received", "interface", c.iface, "ip", ip.String())
+	c.logger.Info("DHCP renewal ACK received", "interface", c.iface, "ip", ip)
 
 	c.mu.Lock()
 	c.lease = resp
 	c.mu.Unlock()
-
-	if err := c.assignIP(ip, resp.ACK); err != nil {
-		c.logger.Error("failed to assign IP after renewal", "interface", c.iface, "ip", ip.String(), "error", err)
-	}
 
 	return ip, nil
 }
@@ -261,57 +251,6 @@ func (c *RealClient) renewalInterval() time.Duration {
 	return t1
 }
 
-func (c *RealClient) assignIP(ip net.IP, ack *dhcpv4.DHCPv4) error {
-	link, err := netlink.LinkByName(c.iface)
-	if err != nil {
-		return fmt.Errorf("failed to find interface: %w", err)
-	}
-
-	subnetMask := subnetMaskFromACK(ack)
-	ones, _ := subnetMask.Size()
-	if ack.SubnetMask() == nil {
-		c.logger.Warn("DHCP ACK missing subnet mask option, falling back to /24", "interface", c.iface)
-	} else {
-		c.logger.Debug("using subnet mask from DHCP ACK", "interface", c.iface, "prefix_len", ones)
-	}
-
-	addr := &netlink.Addr{
-		IPNet: &net.IPNet{
-			IP:   ip,
-			Mask: subnetMask,
-		},
-	}
-
-	// Remove stale addresses and check if the new IP is already assigned.
-	alreadyAssigned := false
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
-	if err == nil {
-		for _, a := range addrs {
-			if a.IP.Equal(ip) {
-				c.logger.Debug("IP already assigned to interface", "interface", c.iface, "ip", ip.String())
-				alreadyAssigned = true
-			} else {
-				c.logger.Info("removing stale IP from interface", "interface", c.iface, "stale_ip", a.IP.String())
-				aCopy := a
-				if rmErr := netlink.AddrDel(link, &aCopy); rmErr != nil {
-					c.logger.Error("failed to remove stale IP", "interface", c.iface, "ip", a.IP.String(), "error", rmErr)
-				}
-			}
-		}
-	}
-
-	if alreadyAssigned {
-		return nil
-	}
-
-	c.logger.Info("assigning IP to interface", "interface", c.iface, "ip", ip.String())
-	if err := netlink.AddrAdd(link, addr); err != nil {
-		return fmt.Errorf("failed to add address: %w", err)
-	}
-
-	return nil
-}
-
 func (c *RealClient) release() error {
 	c.mu.RLock()
 	ip := c.ip
@@ -323,7 +262,7 @@ func (c *RealClient) release() error {
 		return nil
 	}
 
-	c.logger.Info("releasing DHCP lease", "interface", c.iface, "ip", ip.String())
+	c.logger.Info("releasing DHCP lease", "interface", c.iface, "ip", ip)
 
 	client, err := nclient4.New(c.iface,
 		nclient4.WithTimeout(10*time.Second),

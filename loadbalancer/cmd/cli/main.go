@@ -69,7 +69,14 @@ func printUsage() {
 
 func dial(addr string) (*grpc.ClientConn, routerv1.RouterServiceClient, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds := insecure.NewCredentials()
+	if tokenPath := os.Getenv("ROUTER_AUTH_TOKEN_PATH"); tokenPath != "" {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create credentials: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to connect: %v\n", err)
 		os.Exit(1)

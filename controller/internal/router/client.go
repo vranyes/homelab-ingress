@@ -163,10 +163,15 @@ func toProtoPorts(ports []PortMapping) []*routerv1.PortMapping {
 	result := make([]*routerv1.PortMapping, len(ports))
 	for i, p := range ports {
 		result[i] = &routerv1.PortMapping{
-			Protocol:     p.Protocol,
-			ExternalPort: p.ExternalPort,
-			PodPort:      p.PodPort,
-			PodIps:       p.PodIPs,
+			Protocol: p.Protocol,
+			SrcPort:  p.ExternalPort,
+			Dst:      make([]*routerv1.Destination, len(p.PodIPs)),
+		}
+		for j, ip := range p.PodIPs {
+			result[i].Dst[j] = &routerv1.Destination{
+				Addr: ip,
+				Port: p.PodPort,
+			}
 		}
 	}
 	return result
@@ -177,9 +182,9 @@ func fromProto(resp *routerv1.GetLoadBalancerResponse) *ServiceEntry {
 	for i, p := range resp.Ports {
 		ports[i] = PortMapping{
 			Protocol:     p.Protocol,
-			ExternalPort: p.ExternalPort,
-			PodPort:      p.PodPort,
-			PodIPs:       p.PodIps,
+			ExternalPort: p.SrcPort,
+			PodPort:      p.Dst[0].Port,
+			PodIPs:       []string{p.Dst[0].Addr},
 		}
 	}
 	return &ServiceEntry{

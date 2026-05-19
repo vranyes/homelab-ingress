@@ -23,16 +23,62 @@ const DeleteEvent LBEvent = "delete"
 
 type LBNotification struct {
 	Type    LBEvent
-	Service *LBService
+	Service LBService
 }
 
 type LBService struct {
 	ServiceName   string           `json:"service_name"`
-	Interface     string           `json:"interface"`
+	Interface     *string          `json:"interface"`
 	MACAddr       net.HardwareAddr `json:"macaddr"`
-	DHCPAcquired  bool             `json:"dhcp_acquired"`
+	DHCPAcquired  *bool            `json:"dhcp_acquired"`
 	SourceAddress net.IP           `json:"source_address"`
+	SourceMask    net.IPMask       `json:"source_mask,omitempty"`
 	Targets       []LBTarget       `json:"targets"`
+}
+
+func (s *LBService) String() string {
+	return s.ServiceName
+}
+
+func (s *LBService) Clone() *LBService {
+	if s == nil {
+		return nil
+	}
+	copy := *s
+	if s.Interface != nil {
+		ifaceCopy := *s.Interface
+		copy.Interface = &ifaceCopy
+	}
+	if s.DHCPAcquired != nil {
+		dhcpCopy := *s.DHCPAcquired
+		copy.DHCPAcquired = &dhcpCopy
+	}
+	copy.Targets = make([]LBTarget, len(s.Targets))
+	for i, t := range s.Targets {
+		copy.Targets[i] = LBTarget{
+			Protocol: t.Protocol,
+			SrcPort:  t.SrcPort,
+			Dst:      make([]LBDestination, len(t.Dst)),
+		}
+		for j, d := range t.Dst {
+			copy.Targets[i].Dst[j] = LBDestination{
+				Port:    d.Port,
+				Address: d.Address,
+			}
+		}
+	}
+	return &copy
+}
+
+func (s *LBService) GetInterfaceName() string {
+	if s.Interface == nil {
+		return ""
+	}
+	return *s.Interface
+}
+
+func (s *LBService) SetInterfaceName(name string) {
+	s.Interface = &name
 }
 
 type LBTarget struct {

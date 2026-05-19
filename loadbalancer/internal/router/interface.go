@@ -61,19 +61,19 @@ func (m *Manager) Run(notif <-chan state.LBNotification) {
 		case event := <-notif:
 			switch event.Type {
 			case state.CreateEvent:
-				m.logger.Info("received create event", "service", event.Service.ServiceName)
-				if err := m.AddRules(*event.Service); err != nil {
-					m.logger.Error("failed to add rules for service", "service", event.Service.ServiceName, "error", err)
+				m.logger.Info("received create event", "service", event.Service)
+				if err := m.AddRules(event.Service); err != nil {
+					m.logger.Error("failed to add rules for service", "service", event.Service, "error", err)
 				}
 			case state.UpdateEvent:
-				m.logger.Info("received update event", "service", event.Service.ServiceName)
-				if err := m.AddRules(*event.Service); err != nil {
-					m.logger.Error("failed to update rules for service", "service", event.Service.ServiceName, "error", err)
+				m.logger.Info("received update event", "service", event.Service)
+				if err := m.AddRules(event.Service); err != nil {
+					m.logger.Error("failed to update rules for service", "service", event.Service, "error", err)
 				}
 			case state.DeleteEvent:
-				m.logger.Info("received delete event", "service", event.Service.ServiceName)
+				m.logger.Info("received delete event", "service", event.Service)
 				if err := m.RemoveRules(event.Service.ServiceName); err != nil {
-					m.logger.Error("failed to remove rules for service", "service", event.Service.ServiceName, "error", err)
+					m.logger.Error("failed to remove rules for service", "service", event.Service, "error", err)
 				}
 			}
 

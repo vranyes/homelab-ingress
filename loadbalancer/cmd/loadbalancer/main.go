@@ -16,6 +16,7 @@ import (
 
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/auth"
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/config"
+	"github.com/vranyes/homelab-ingress/loadbalancer/internal/dhcp"
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/macvlan"
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/service"
 	"github.com/vranyes/homelab-ingress/loadbalancer/internal/state"
@@ -48,24 +49,33 @@ func main() {
 	go linkMgr.Run(st.UpdateCh)
 
 	// Create DHCP manager with factory that updates firewall rules on IP change
-	// dhcpMgr := dhcp.NewManagerWithFactoryAndLogger(
-	// 	func(iface string, ip net.IP) {
-	// 		key := ifaceToServiceKey(st, iface)
-	// 		if key == "" {
-	// 			logger.Warn("could not find service key for interface", "interface", iface)
-	// 			return
-	// 		}
+	dhcpMgr := dhcp.NewManagerWithFactoryAndLogger(st,
+		func(iface string, ip net.IP) {
+			key := ifaceToServiceKey(st, iface)
+			if key == "" {
+				logger.Warn("could not find service key for interface", "interface", iface)
+				return
+			}
+			svc, ok := state.GetService(st, key)
+			if !ok {
+				logger.Warn("service not found for interface", "interface", iface, "service_key", key)
+				return
+			}
 
-	// 		// Update state with new IP
-	// 		state.UpdateIP(st, key, ip)
-	// 	},
-	// 	func(iface string, mac net.HardwareAddr, onChange dhcp.IPChangeFunc) dhcp.Client {
-	// 		return dhcp.NewRealClientWithLogger(iface, mac, onChange, logger)
-	// 	},
-	// 	logger,
-	// )
-	// dhcpMgr.Watch()
-	// defer dhcpMgr.StopAll()
+			logger.Info("DHCP acquired IP", "interface", iface, "ip", ip.String(), "service_key", key)
+			// Update service with assigned IP
+			svc.SourceAddress = ip
+
+			// Update state with new IP
+			state.UpdateService(st, svc)
+		},
+		func(iface string, mac net.HardwareAddr, onChange dhcp.IPChangeFunc) dhcp.Client {
+			return dhcp.NewRealClientWithLogger(iface, mac, onChange, logger)
+		},
+		logger,
+	)
+	dhcpMgr.Run(st.UpdateCh)
+	defer dhcpMgr.StopAll()
 
 	// reuse the same store instance created earlier
 	srv := service.NewRouterServerWithLogger(store, st, logger)
@@ -143,7 +153,7 @@ func ifaceToServiceKey(st *state.State, iface string) string {
 	// Snapshot state to iterate safely.
 	snap := st.Clone()
 	for key, svc := range snap.Services {
-		if svc.Interface == iface {
+		if svc.GetInterfaceName() == iface {
 			return key
 		}
 	}

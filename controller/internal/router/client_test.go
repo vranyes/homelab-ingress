@@ -178,9 +178,13 @@ func TestClient_Update(t *testing.T) {
 	client := newTestClient(t, addr)
 
 	fake.services["default/myapp"] = &routerv1.GetLoadBalancerResponse{
-		ServiceKey:    "default/myapp",
-		AssignedIp:    "192.168.1.100",
-		Ports:         []*routerv1.PortMapping{{Protocol: "tcp", ExternalPort: 80, PodPort: 80, PodIps: []string{"10.42.0.10"}}},
+		ServiceKey: "default/myapp",
+		AssignedIp: "192.168.1.100",
+		Ports: []*routerv1.PortMapping{{
+			Protocol: "tcp",
+			SrcPort:  80,
+			Dst:      []*routerv1.Destination{{Addr: "10.42.0.10", Port: 80}},
+		}},
 		DhcpAcquired:  true,
 		InterfaceName: "lb-default-myapp",
 	}
@@ -249,9 +253,14 @@ func TestClient_Get(t *testing.T) {
 	client := newTestClient(t, addr)
 
 	fake.services["default/myapp"] = &routerv1.GetLoadBalancerResponse{
-		ServiceKey:    "default/myapp",
-		AssignedIp:    "81.23.45.67",
-		Ports:         []*routerv1.PortMapping{{Protocol: "tcp", ExternalPort: 443, PodPort: 8443, PodIps: []string{"10.42.0.10"}}},
+		ServiceKey: "default/myapp",
+		AssignedIp: "81.23.45.67",
+		Ports: []*routerv1.PortMapping{{
+			Protocol: "tcp",
+			SrcPort:  443,
+			Dst: []*routerv1.Destination{
+				{Addr: "10.42.0.10", Port: 8443},
+			}}},
 		DhcpAcquired:  true,
 		InterfaceName: "lb-default-myapp",
 	}
@@ -392,8 +401,8 @@ func TestToProtoPorts(t *testing.T) {
 	if result[0].Protocol != "tcp" {
 		t.Errorf("expected tcp, got %q", result[0].Protocol)
 	}
-	if len(result[0].PodIps) != 2 {
-		t.Errorf("expected 2 pod IPs, got %d", len(result[0].PodIps))
+	if len(result[0].Dst) != 2 {
+		t.Errorf("expected 2 pod IPs, got %d", len(result[0].Dst))
 	}
 }
 
@@ -404,7 +413,9 @@ func TestFromProto(t *testing.T) {
 		DhcpAcquired:  true,
 		InterfaceName: "lb-ns-svc",
 		Ports: []*routerv1.PortMapping{
-			{Protocol: "tcp", ExternalPort: 443, PodPort: 8443, PodIps: []string{"10.0.0.1"}},
+			{Protocol: "tcp", SrcPort: 443, Dst: []*routerv1.Destination{
+				{Addr: "10.0.0.1", Port: 8443},
+			}},
 		},
 	}
 	entry := fromProto(resp)

@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+
+	"github.com/vranyes/homelab-ingress/loadbalancer/internal/state"
 )
 
 type IPChangeFunc func(iface string, ip net.IP)
@@ -21,6 +23,7 @@ type ClientFactory func(iface string, mac net.HardwareAddr, onChange IPChangeFun
 type Manager struct {
 	mu        sync.RWMutex
 	clients   map[string]Client
+	st        *state.State
 	onChange  IPChangeFunc
 	newClient ClientFactory
 	logger    *slog.Logger
@@ -53,9 +56,10 @@ func NewManagerWithFactory(onChange IPChangeFunc, factory ClientFactory) *Manage
 	}
 }
 
-func NewManagerWithFactoryAndLogger(onChange IPChangeFunc, factory ClientFactory, logger *slog.Logger) *Manager {
+func NewManagerWithFactoryAndLogger(st *state.State, onChange IPChangeFunc, factory ClientFactory, logger *slog.Logger) *Manager {
 	return &Manager{
 		clients:   make(map[string]Client),
+		st:        st,
 		onChange:  onChange,
 		newClient: factory,
 		logger:    logger,
@@ -180,4 +184,25 @@ func (m *Manager) ListInterfaces() []string {
 	}
 	m.logger.Debug("listing DHCP interfaces", "count", len(interfaces))
 	return interfaces
+}
+
+func (m *Manager) Run(svc <-chan state.LBNotification) {
+	for {
+		event := <-svc
+		ifname := event.Service.GetInterfaceName()
+		m.logger.Info("received service update", "interface", ifname, "event", event)
+		switch event.Type {
+		case state.CreateEvent, state.UpdateEvent:
+			m.logger.Info("handling create/update event", "interface", ifname)
+			for _, i := range m.ListInterfaces() {
+				m.logger.Debug("checking existing interface", "interface", i)
+				continue
+			}
+			m.NewAndAdd(ifname, event.Service.MACAddr)
+		case state.DeleteEvent:
+			// Handle delete event
+			m.logger.Info("handling delete event", "interface", ifname)
+			m.Remove(ifname)
+		}
+	}
 }

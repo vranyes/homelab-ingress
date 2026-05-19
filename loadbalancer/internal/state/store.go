@@ -2,7 +2,6 @@ package state
 
 import (
 	"encoding/json"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -63,26 +62,6 @@ func (s *Store) Save(st *State) error {
 	return os.Rename(tmp, s.path)
 }
 
-// Package-level helpers that mutate or access State must use the package
-// mutex so concurrent callers (DHCP callbacks, gRPC handlers) don't race.
-func UpdateIP(st *State, serviceKey string, ip net.IP) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	svc, ok := st.Services[serviceKey]
-	if !ok {
-		return
-	}
-	svc.SourceAddress = ip
-	if ip != nil {
-		svc.DHCPAcquired = true
-	}
-	st.UpdateCh <- LBNotification{
-		Type:    UpdateEvent,
-		Service: svc,
-	}
-}
-
 func UpdateService(st *State, svc *LBService) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -96,18 +75,22 @@ func UpdateService(st *State, svc *LBService) {
 	st.Services[svc.ServiceName] = svc
 	st.UpdateCh <- LBNotification{
 		Type:    eventType,
-		Service: svc,
+		Service: *svc.Clone(),
 	}
 }
 
 func DeleteService(st *State, serviceKey string) {
 	mu.Lock()
+	defer delete(st.Services, serviceKey)
 	defer mu.Unlock()
 
-	delete(st.Services, serviceKey)
+	svc, ok := st.Services[serviceKey]
+	if !ok {
+		return
+	}
 	st.UpdateCh <- LBNotification{
 		Type:    DeleteEvent,
-		Service: &LBService{ServiceName: serviceKey},
+		Service: *svc.Clone(),
 	}
 }
 
