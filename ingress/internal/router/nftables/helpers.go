@@ -1,6 +1,7 @@
 package nftables
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 
@@ -17,8 +18,8 @@ const priority = -110
 // traffic is SNATed.
 const ctMarkValue = 0x10
 
-// chainName converts a service key to a valid nftables chain name.
-func chainName(prefix, serviceKey string) string {
+// ChainName converts a service key to a valid nftables chain name.
+func ChainName(prefix, serviceKey string) string {
 	safe := strings.ReplaceAll(serviceKey, "/", "_")
 	safe = strings.ReplaceAll(safe, "-", "_")
 	name := prefix + "_" + safe
@@ -36,4 +37,28 @@ func validateService(svc state.LBService) error {
 		return fmt.Errorf("no ports provided")
 	}
 	return nil
+}
+
+// DestinationsEqual checks whether raw set element values match the desired
+// destinations, ignoring the kernel's element ordering.
+func DestinationsEqual(values [][]byte, dests []state.LBDestination) bool {
+	if len(values) != len(dests) {
+		return false
+	}
+	expected := make(map[string]struct{}, len(dests))
+	for _, d := range dests {
+		if len(d.Address) != 4 {
+			return false
+		}
+		val := make([]byte, 8)
+		copy(val[0:4], d.Address)
+		binary.BigEndian.PutUint16(val[4:6], uint16(d.Port))
+		expected[string(val)] = struct{}{}
+	}
+	for _, v := range values {
+		if _, ok := expected[string(v)]; !ok {
+			return false
+		}
+	}
+	return true
 }

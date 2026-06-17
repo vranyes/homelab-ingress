@@ -61,8 +61,8 @@ func (m *Manager) AddRules(service state.LBService) error {
 		return fmt.Errorf("ensure postrouting: %w", err)
 	}
 
-	chainIngress := chainName("ingress", service.ServiceName)
-	chainForward := chainName("forward", service.ServiceName)
+	chainIngress := ChainName("ingress", service.ServiceName)
+	chainForward := ChainName("forward", service.ServiceName)
 
 	needsUpdate, err := m.rulesNeedUpdate(table, service, chainIngress, chainForward)
 	if err != nil {
@@ -132,7 +132,7 @@ func (m *Manager) AddRules(service state.LBService) error {
 			m.conn.AddRule(&nftables.Rule{Table: table, Chain: fwdChain, Exprs: replyExprs})
 		}
 	}
-	m.conn.AddRule(&nftables.Rule{Table: table, Chain: svcChain, Exprs: []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}})
+	// m.conn.AddRule(&nftables.Rule{Table: table, Chain: fwdChain, Exprs: []expr.Any{&expr.Verdict{Kind: expr.VerdictDrop}}})
 
 	if err := m.conn.Flush(); err != nil {
 		return fmt.Errorf("flush: %w", err)
@@ -157,8 +157,8 @@ func (m *Manager) RemoveRules(serviceKey string) error {
 	}
 
 	return errors.Join(
-		m.removeServiceChain(table, chainName("ingress", serviceKey)),
-		m.removeServiceChain(table, chainName("forward", serviceKey)),
+		m.removeServiceChain(table, ChainName("ingress", serviceKey)),
+		m.removeServiceChain(table, ChainName("forward", serviceKey)),
 	)
 }
 
@@ -213,7 +213,8 @@ func (m *Manager) ensurePostrouting(table *nftables.Table) error {
 		Priority: nftables.ChainPriorityNATSource,
 		Policy:   &policy,
 	})
-	m.conn.AddRule(&nftables.Rule{Table: table, Chain: post, Exprs: append(ctMarkGetExprs(), &expr.Masq{})})
+	// , Exprs: append(ctMarkGetExprs(), &expr.Masq{})
+	m.conn.AddRule(&nftables.Rule{Table: table, Chain: post})
 	return m.conn.Flush()
 }
 
@@ -423,22 +424,11 @@ func (m *Manager) setMatchesDestinations(table *nftables.Table, setName string, 
 			if err != nil {
 				return false
 			}
-			if len(elements) != len(dests) {
-				return false
+			values := make([][]byte, len(elements))
+			for i, e := range elements {
+				values[i] = e.Val
 			}
-			for i, elem := range elements {
-				parsed := dests[i].Address.To4()
-				if parsed == nil {
-					return false
-				}
-				val := make([]byte, 8)
-				copy(val[0:4], parsed)
-				binary.BigEndian.PutUint16(val[4:6], uint16(dests[i].Port))
-				if !bytes.Equal(elem.Val, val) {
-					return false
-				}
-			}
-			return true
+			return DestinationsEqual(values, dests)
 		}
 	}
 	return false
@@ -465,11 +455,13 @@ func protoByte(protocol string) byte {
 func (m *Manager) addLBMapNamed(table *nftables.Table, setName string, dests []state.LBDestination) (*nftables.Set, []expr.Any, error) {
 	dataType := nftables.MustConcatSetType(nftables.TypeIPAddr, nftables.TypeInetService)
 	set := &nftables.Set{
-		Table:    table,
-		Name:     setName,
-		KeyType:  nftables.TypeInteger,
-		DataType: dataType,
-		IsMap:    true,
+		Table:         table,
+		Name:          setName,
+		KeyType:       nftables.TypeInteger,
+		DataType:      dataType,
+		IsMap:         true,
+		Constant:      true,
+		Concatenation: true,
 	}
 
 	elements := make([]nftables.SetElement, len(dests))
