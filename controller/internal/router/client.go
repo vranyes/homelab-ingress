@@ -25,12 +25,12 @@ type ServiceEntry struct {
 
 type Destination struct {
 	Addr string
-	Port int32
+	Port uint16
 }
 
 type PortMapping struct {
 	Protocol     string
-	ExternalPort int32
+	ExternalPort uint16
 	Destinations []Destination
 }
 
@@ -168,13 +168,13 @@ func toProtoPorts(ports []PortMapping) []*routerv1.PortMapping {
 	for i, p := range ports {
 		result[i] = &routerv1.PortMapping{
 			Protocol: p.Protocol,
-			SrcPort:  p.ExternalPort,
+			SrcPort:  uint32(p.ExternalPort),
 			Dst:      make([]*routerv1.Destination, len(p.Destinations)),
 		}
 		for j, d := range p.Destinations {
 			result[i].Dst[j] = &routerv1.Destination{
 				Addr: d.Addr,
-				Port: d.Port,
+				Port: uint32(d.Port),
 			}
 		}
 	}
@@ -188,12 +188,12 @@ func fromProto(resp *routerv1.GetLoadBalancerResponse) *ServiceEntry {
 		for j, d := range p.Dst {
 			dst[j] = Destination{
 				Addr: d.Addr,
-				Port: d.Port,
+				Port: uint16(d.Port),
 			}
 		}
 		ports[i] = PortMapping{
 			Protocol:     p.Protocol,
-			ExternalPort: p.SrcPort,
+			ExternalPort: uint16(p.SrcPort),
 			Destinations: dst,
 		}
 	}

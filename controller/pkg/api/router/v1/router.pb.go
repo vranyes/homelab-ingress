@@ -24,7 +24,7 @@ const (
 type PortMapping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Protocol      string                 `protobuf:"bytes,1,opt,name=protocol,proto3" json:"protocol,omitempty"`
-	SrcPort       int32                  `protobuf:"varint,2,opt,name=src_port,json=srcPort,proto3" json:"src_port,omitempty"`
+	SrcPort       uint32                 `protobuf:"varint,2,opt,name=src_port,json=srcPort,proto3" json:"src_port,omitempty"`
 	Dst           []*Destination         `protobuf:"bytes,3,rep,name=dst,proto3" json:"dst,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -67,7 +67,7 @@ func (x *PortMapping) GetProtocol() string {
 	return ""
 }
 
-func (x *PortMapping) GetSrcPort() int32 {
+func (x *PortMapping) GetSrcPort() uint32 {
 	if x != nil {
 		return x.SrcPort
 	}
@@ -83,7 +83,7 @@ func (x *PortMapping) GetDst() []*Destination {
 
 type Destination struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Port          int32                  `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
+	Port          uint32                 `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
 	Addr          string                 `protobuf:"bytes,2,opt,name=addr,proto3" json:"addr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -119,7 +119,7 @@ func (*Destination) Descriptor() ([]byte, []int) {
 	return file_router_v1_router_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *Destination) GetPort() int32 {
+func (x *Destination) GetPort() uint32 {
 	if x != nil {
 		return x.Port
 	}
@@ -700,10 +700,10 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x16router/v1/router.proto\x12\trouter.v1\"n\n" +
 	"\vPortMapping\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\tR\bprotocol\x12\x19\n" +
-	"\bsrc_port\x18\x02 \x01(\x05R\asrcPort\x12(\n" +
+	"\bsrc_port\x18\x02 \x01(\rR\asrcPort\x12(\n" +
 	"\x03dst\x18\x03 \x03(\v2\x16.router.v1.DestinationR\x03dst\"5\n" +
 	"\vDestination\x12\x12\n" +
-	"\x04port\x18\x01 \x01(\x05R\x04port\x12\x12\n" +
+	"\x04port\x18\x01 \x01(\rR\x04port\x12\x12\n" +
 	"\x04addr\x18\x02 \x01(\tR\x04addr\"j\n" +
 	"\x19CreateLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +

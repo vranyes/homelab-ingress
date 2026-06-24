@@ -44,7 +44,7 @@ func (m *Manager) Reconcile() error {
 	}
 	for _, want := range snap.Services {
 		if err := m.AddRules(*want); err != nil {
-			e = errors.Join(e, err)
+			errors.Join(e, errors.New("failed to add rules for service "+want.ServiceName+": "+err.Error()))
 		}
 	}
 	return e
@@ -72,7 +72,7 @@ func (m *Manager) Run(notif <-chan state.LBNotification) {
 				}
 			}
 
-		case <-time.After(30 * time.Second):
+		case <-time.After(5 * time.Minute):
 			if err := m.Reconcile(); err != nil {
 				m.logger.Error("failed to reconcile state", "error", err)
 			}

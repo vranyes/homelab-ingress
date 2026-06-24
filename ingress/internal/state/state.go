@@ -101,12 +101,12 @@ func (s *LBService) SetInterfaceName(name string) {
 
 type LBTarget struct {
 	Protocol string          `json:"protocol"`
-	SrcPort  int             `json:"external_port"`
+	SrcPort  uint16          `json:"external_port"`
 	Dst      []LBDestination `json:"destinations"`
 }
 
 type LBDestination struct {
-	Port    int    `json:"port"`
+	Port    uint16 `json:"port"`
 	Address net.IP `json:"address,omitempty"`
 }
 

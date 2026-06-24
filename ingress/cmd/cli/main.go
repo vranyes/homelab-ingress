@@ -76,10 +76,10 @@ func printUsage() {
 	fmt.Println("  -addr string    gRPC address (default \"localhost:50051\")")
 	fmt.Println("  -token string   OIDC Bearer token for authentication")
 	fmt.Println("  -service string Service key (e.g. default/myapp)")
-	fmt.Println("  -port string    Port mapping: protocol:external_port:pod_port:[pod_ip,...]")
+	fmt.Println("  -port string    Port mapping: protocol,external_port,target_ip:target_port,...")
 	fmt.Println("                  Can be specified multiple times")
-	fmt.Println("                  Example: tcp:80:8080:10.42.0.10")
-	fmt.Println("                  Example: tcp:443:8443:10.42.0.10,10.42.0.11")
+	fmt.Println("                  Example: tcp,80,10.42.0.10:8000")
+	fmt.Println("                  Example: tcp,443,10.42.0.10:8443,10.42.0.11:9443")
 }
 
 func dial(addr, token string) (*grpc.ClientConn, routerv1.RouterServiceClient, context.CancelFunc) {
@@ -333,9 +333,9 @@ func parsePortMappings(flags []string) []*routerv1.PortMapping {
 }
 
 func parsePortMapping(s string) *routerv1.PortMapping {
-	parts := strings.Split(s, ":")
+	parts := strings.Split(s, ",")
 	if len(parts) < 3 {
-		fmt.Fprintf(os.Stderr, "invalid port mapping %q: expected protocol:extPort:podPort:[podIPs]\n", s)
+		fmt.Fprintf(os.Stderr, "invalid port mapping %q: expected protocol,extPort,targetIP:targetPort,...\n", s)
 		os.Exit(1)
 	}
 
@@ -345,35 +345,27 @@ func parsePortMapping(s string) *routerv1.PortMapping {
 		os.Exit(1)
 	}
 
-	podPort, err := strconv.Atoi(parts[2])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid pod port %q: %v\n", parts[2], err)
-		os.Exit(1)
-	}
-
-	var podIPs []string
-	if len(parts) >= 4 && parts[3] != "" {
-		podIPs = strings.Split(parts[3], ",")
-	}
-
-	var dsts []*routerv1.Destination
-	if len(podIPs) == 0 {
-		dsts = []*routerv1.Destination{{
-			Port: int32(podPort),
-		}}
-	} else {
-		dsts = make([]*routerv1.Destination, len(podIPs))
-		for i, ip := range podIPs {
-			dsts[i] = &routerv1.Destination{
-				Addr: ip,
-				Port: int32(podPort),
-			}
+	dsts := []*routerv1.Destination{}
+	for _, part := range parts[2:] {
+		s := strings.Split(part, ":")
+		if len(s) != 2 {
+			fmt.Fprintf(os.Stderr, "invalid port mapping %q: expected targetIP:targetPort\n", part)
+			os.Exit(1)
 		}
+		p, err := strconv.Atoi(s[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid port %q: %v\n", s[1], err)
+			os.Exit(1)
+		}
+		dsts = append(dsts, &routerv1.Destination{
+			Addr: s[0],
+			Port: uint32(p),
+		})
 	}
 
 	return &routerv1.PortMapping{
 		Protocol: parts[0],
-		SrcPort:  int32(extPort),
+		SrcPort:  uint32(extPort),
 		Dst:      dsts,
 	}
 }

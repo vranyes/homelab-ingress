@@ -14,8 +14,8 @@ import (
 
 type RouterServer struct {
 	routerv1.UnimplementedRouterServiceServer
-	stateData        *state.State
-	logger           *slog.Logger
+	stateData         *state.State
+	logger            *slog.Logger
 	ActiveMacvlanFunc func() int32
 }
 
@@ -148,7 +148,7 @@ func (s *RouterServer) ListLoadBalancers(ctx context.Context, req *routerv1.List
 func (s *RouterServer) Health(ctx context.Context, req *routerv1.HealthRequest) (*routerv1.HealthResponse, error) {
 	s.logger.Debug("Health check request")
 
-	count := int32(0)
+	var count int32
 	if s.ActiveMacvlanFunc != nil {
 		count = s.ActiveMacvlanFunc()
 	}
@@ -165,12 +165,12 @@ func protoPortsToState(ports []*routerv1.PortMapping) []state.LBTarget {
 	for i, p := range ports {
 		result[i] = state.LBTarget{
 			Protocol: p.Protocol,
-			SrcPort:  int(p.SrcPort),
+			SrcPort:  uint16(p.SrcPort),
 			Dst:      make([]state.LBDestination, len(p.GetDst())),
 		}
 		for j, addr := range p.GetDst() {
 			result[i].Dst[j] = state.LBDestination{
-				Port:    int(addr.GetPort()),
+				Port:    uint16(addr.GetPort()),
 				Address: net.ParseIP(addr.GetAddr()),
 			}
 		}
@@ -183,12 +183,12 @@ func statePortsToProto(ports []state.LBTarget) []*routerv1.PortMapping {
 	for i, p := range ports {
 		result[i] = &routerv1.PortMapping{
 			Protocol: p.Protocol,
-			SrcPort:  int32(p.SrcPort),
+			SrcPort:  uint32(p.SrcPort),
 			Dst:      make([]*routerv1.Destination, len(p.Dst)),
 		}
 		for j, d := range p.Dst {
 			result[i].Dst[j] = &routerv1.Destination{
-				Port: int32(d.Port),
+				Port: uint32(d.Port),
 				Addr: d.Address.String(),
 			}
 		}

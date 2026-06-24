@@ -133,7 +133,7 @@ func (r *ServiceReconciler) findServiceForEndpointSlice(ctx context.Context, obj
 type target struct {
 	Name string
 	IP   string
-	Port int32
+	Port uint16
 }
 
 func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Service) (ctrl.Result, error) {
@@ -274,7 +274,7 @@ func (r *ServiceReconciler) endpointInfoForService(ctx context.Context, svc *cor
 			for _, ip := range ips {
 				targets = append(targets, target{
 					Name: *sp.Name,
-					Port: *sp.Port,
+					Port: uint16(*sp.Port),
 					IP:   ip,
 				})
 			}
@@ -297,9 +297,9 @@ func buildPortMappings(svc *corev1.Service, targets []target) []router.PortMappi
 			proto = "udp"
 		}
 
-		var podPort int32
+		var podPort uint16
 		if p.TargetPort.Type == intstr.Int {
-			podPort = int32(p.TargetPort.IntValue())
+			podPort = uint16(p.TargetPort.IntValue())
 		} else if p.TargetPort.Type == intstr.String {
 			name := p.TargetPort.StrVal
 			if name != "" {
@@ -326,7 +326,7 @@ func buildPortMappings(svc *corev1.Service, targets []target) []router.PortMappi
 
 		mappings = append(mappings, router.PortMapping{
 			Protocol:     proto,
-			ExternalPort: int32(p.Port),
+			ExternalPort: uint16(p.Port),
 			Destinations: dst,
 		})
 	}
@@ -377,7 +377,7 @@ func destinationsEqual(a, b []router.Destination) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	m := make(map[string]int32)
+	m := make(map[string]uint16)
 	for _, d := range a {
 		m[d.Addr] = d.Port
 	}

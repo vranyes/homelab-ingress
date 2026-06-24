@@ -13,12 +13,12 @@ service RouterService {
 
 message PortMapping {
   string protocol = 1;
-  int32 src_port = 2;
+  uint32 src_port = 2;
   repeated Destination dst = 3;
 }
 
 message Destination {
-  int32 port = 1;
+  uint32 port = 1;
   string addr = 2;
 }
 
