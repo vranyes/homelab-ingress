@@ -26,22 +26,32 @@ func TestValidate(t *testing.T) {
 	}{
 		{
 			name:    "valid config",
-			cfg:     Config{RouterAddr: "localhost:50051", PollInterval: 30 * time.Second},
+			cfg:     Config{RouterAddr: "localhost:50051", PollInterval: 30 * time.Second, TokenPath: "/token", CAPath: "/ca.pem"},
 			wantErr: false,
 		},
 		{
 			name:    "missing router addr",
-			cfg:     Config{RouterAddr: "", PollInterval: 30 * time.Second},
+			cfg:     Config{RouterAddr: "", PollInterval: 30 * time.Second, TokenPath: "/token", CAPath: "/ca.pem"},
 			wantErr: true,
 		},
 		{
 			name:    "zero poll interval",
-			cfg:     Config{RouterAddr: "localhost:50051", PollInterval: 0},
+			cfg:     Config{RouterAddr: "localhost:50051", PollInterval: 0, TokenPath: "/token", CAPath: "/ca.pem"},
 			wantErr: true,
 		},
 		{
 			name:    "negative poll interval",
-			cfg:     Config{RouterAddr: "localhost:50051", PollInterval: -10 * time.Second},
+			cfg:     Config{RouterAddr: "localhost:50051", PollInterval: -10 * time.Second, TokenPath: "/token", CAPath: "/ca.pem"},
+			wantErr: true,
+		},
+		{
+			name:    "missing token path",
+			cfg:     Config{RouterAddr: "localhost:50051", PollInterval: 30 * time.Second, TokenPath: "", CAPath: "/ca.pem"},
+			wantErr: true,
+		},
+		{
+			name:    "missing ca path",
+			cfg:     Config{RouterAddr: "localhost:50051", PollInterval: 30 * time.Second, TokenPath: "/token", CAPath: ""},
 			wantErr: true,
 		},
 	}

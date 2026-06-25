@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,10 +13,13 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 
 	routerv1 "github.com/vranyes/homelab-ingress/ingress/pkg/api/router/v1"
 )
+
+const defaultAddr = "localhost:50051"
+const defaultCACert = "/etc/homelab-ingress/ca.pem"
 
 type tokenCredential struct {
 	token string
@@ -27,10 +32,8 @@ func (t *tokenCredential) GetRequestMetadata(ctx context.Context, uri ...string)
 }
 
 func (t *tokenCredential) RequireTransportSecurity() bool {
-	return false
+	return true
 }
-
-const defaultAddr = "localhost:50051"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -59,6 +62,20 @@ func main() {
 	}
 }
 
+type commonFlags struct {
+	addr    string
+	token   string
+	caCert  string
+}
+
+func addCommonFlags(fs *flag.FlagSet) *commonFlags {
+	return &commonFlags{
+		addr:   *fs.String("addr", defaultAddr, "gRPC address"),
+		token:  *fs.String("token", os.Getenv("ROUTER_AUTH_TOKEN"), "OIDC Bearer token"),
+		caCert: *fs.String("ca-cert", defaultCACert, "Path to server CA certificate"),
+	}
+}
+
 func printUsage() {
 	fmt.Println("Usage: router-cli <command> [flags]")
 	fmt.Println()
@@ -75,6 +92,7 @@ func printUsage() {
 	fmt.Println("Flags:")
 	fmt.Println("  -addr string    gRPC address (default \"localhost:50051\")")
 	fmt.Println("  -token string   OIDC Bearer token for authentication")
+	fmt.Println("  -ca-cert string Path to server CA certificate (default \"/etc/homelab-ingress/ca.pem\")")
 	fmt.Println("  -service string Service key (e.g. default/myapp)")
 	fmt.Println("  -port string    Port mapping: protocol,external_port,target_ip:target_port,...")
 	fmt.Println("                  Can be specified multiple times")
@@ -82,10 +100,24 @@ func printUsage() {
 	fmt.Println("                  Example: tcp,443,10.42.0.10:8443,10.42.0.11:9443")
 }
 
-func dial(addr, token string) (*grpc.ClientConn, routerv1.RouterServiceClient, context.CancelFunc) {
+func dial(addr, token, caCertPath string) (*grpc.ClientConn, routerv1.RouterServiceClient, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	creds := insecure.NewCredentials()
-	opts := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+
+	pool := x509.NewCertPool()
+	caData, err := os.ReadFile(caCertPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to read CA cert %q: %v\n", caCertPath, err)
+		os.Exit(1)
+	}
+	if !pool.AppendCertsFromPEM(caData) {
+		fmt.Fprintf(os.Stderr, "no valid CA cert in %q\n", caCertPath)
+		os.Exit(1)
+	}
+	tlsCfg := &tls.Config{
+		RootCAs:    pool,
+		MinVersion: tls.VersionTLS12,
+	}
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
 	if token != "" {
 		opts = append(opts, grpc.WithPerRPCCredentials(&tokenCredential{token: token}))
 	}
@@ -99,11 +131,10 @@ func dial(addr, token string) (*grpc.ClientConn, routerv1.RouterServiceClient, c
 
 func cmdHealth(args []string) {
 	fs := flag.NewFlagSet("health", flag.ExitOnError)
-	addr := fs.String("addr", defaultAddr, "gRPC address")
-	token := fs.String("token", os.Getenv("ROUTER_AUTH_TOKEN"), "OIDC Bearer token")
+	cf := addCommonFlags(fs)
 	_ = fs.Parse(args)
 
-	conn, client, cancel := dial(*addr, *token)
+	conn, client, cancel := dial(cf.addr, cf.token, cf.caCert)
 	defer conn.Close()
 	defer cancel()
 
@@ -120,8 +151,7 @@ func cmdHealth(args []string) {
 
 func cmdCreate(args []string) {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
-	addr := fs.String("addr", defaultAddr, "gRPC address")
-	token := fs.String("token", os.Getenv("ROUTER_AUTH_TOKEN"), "OIDC Bearer token")
+	cf := addCommonFlags(fs)
 	service := fs.String("service", "", "service key (required)")
 	var ports stringSliceFlag
 	fs.Var(&ports, "port", "port mapping (protocol:extPort:podPort:[podIPs])")
@@ -138,7 +168,7 @@ func cmdCreate(args []string) {
 
 	parsedPorts := parsePortMappings(ports)
 
-	conn, client, cancel := dial(*addr, *token)
+	conn, client, cancel := dial(cf.addr, cf.token, cf.caCert)
 	defer conn.Close()
 	defer cancel()
 
@@ -157,8 +187,7 @@ func cmdCreate(args []string) {
 
 func cmdUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
-	addr := fs.String("addr", defaultAddr, "gRPC address")
-	token := fs.String("token", os.Getenv("ROUTER_AUTH_TOKEN"), "OIDC Bearer token")
+	cf := addCommonFlags(fs)
 	service := fs.String("service", "", "service key (required)")
 	var ports stringSliceFlag
 	fs.Var(&ports, "port", "port mapping (protocol:extPort:podPort:[podIPs])")
@@ -175,7 +204,7 @@ func cmdUpdate(args []string) {
 
 	parsedPorts := parsePortMappings(ports)
 
-	conn, client, cancel := dial(*addr, *token)
+	conn, client, cancel := dial(cf.addr, cf.token, cf.caCert)
 	defer conn.Close()
 	defer cancel()
 
@@ -193,8 +222,7 @@ func cmdUpdate(args []string) {
 
 func cmdDelete(args []string) {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
-	addr := fs.String("addr", defaultAddr, "gRPC address")
-	token := fs.String("token", os.Getenv("ROUTER_AUTH_TOKEN"), "OIDC Bearer token")
+	cf := addCommonFlags(fs)
 	service := fs.String("service", "", "service key (required)")
 	_ = fs.Parse(args)
 
@@ -203,7 +231,7 @@ func cmdDelete(args []string) {
 		os.Exit(1)
 	}
 
-	conn, client, cancel := dial(*addr, *token)
+	conn, client, cancel := dial(cf.addr, cf.token, cf.caCert)
 	defer conn.Close()
 	defer cancel()
 
@@ -220,8 +248,7 @@ func cmdDelete(args []string) {
 
 func cmdGet(args []string) {
 	fs := flag.NewFlagSet("get", flag.ExitOnError)
-	addr := fs.String("addr", defaultAddr, "gRPC address")
-	token := fs.String("token", os.Getenv("ROUTER_AUTH_TOKEN"), "OIDC Bearer token")
+	cf := addCommonFlags(fs)
 	service := fs.String("service", "", "service key (required)")
 	_ = fs.Parse(args)
 
@@ -230,7 +257,7 @@ func cmdGet(args []string) {
 		os.Exit(1)
 	}
 
-	conn, client, cancel := dial(*addr, *token)
+	conn, client, cancel := dial(cf.addr, cf.token, cf.caCert)
 	defer conn.Close()
 	defer cancel()
 
@@ -247,12 +274,11 @@ func cmdGet(args []string) {
 
 func cmdList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	addr := fs.String("addr", defaultAddr, "gRPC address")
-	token := fs.String("token", os.Getenv("ROUTER_AUTH_TOKEN"), "OIDC Bearer token")
+	cf := addCommonFlags(fs)
 	jsonOutput := fs.Bool("json", false, "output as JSON")
 	_ = fs.Parse(args)
 
-	conn, client, cancel := dial(*addr, *token)
+	conn, client, cancel := dial(cf.addr, cf.token, cf.caCert)
 	defer conn.Close()
 	defer cancel()
 

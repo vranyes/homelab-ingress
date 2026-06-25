@@ -29,6 +29,9 @@ type Auth struct {
 	Audience string `yaml:"audience"`
 	// AllowedSubjects is the list of subject (sub) claim values that are allowed to use the service
 	AllowedSubjects []string `yaml:"allowed_subjects"`
+	// TrustedRoot is an optional path to a CA certificate file used to verify
+	// the TLS connection to the OIDC issuer. When empty, the system CA pool is used.
+	TrustedRoot string `yaml:"trusted_root_ca"`
 }
 
 func DefaultConfig() Config {
@@ -70,10 +73,11 @@ func validate(cfg *Config) error {
 	if cfg.BaseInterface == "" {
 		return errors.New("base_interface is required")
 	}
-
-	// If auth is partially configured, require both issuer and allowed subjects
-	if (cfg.Auth.Issuer != "" && len(cfg.Auth.AllowedSubjects) == 0) || (cfg.Auth.Issuer == "" && len(cfg.Auth.AllowedSubjects) > 0) {
-		return errors.New("auth configuration: both auth.issuer and auth.allowed_subjects must be set together")
+	if cfg.Auth.Issuer == "" {
+		return errors.New("auth.issuer is required")
+	}
+	if len(cfg.Auth.AllowedSubjects) == 0 {
+		return errors.New("auth.allowed_subjects is required")
 	}
 	return nil
 }

@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"os"
 	"strings"
@@ -9,7 +11,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	routerv1 "github.com/vranyes/homelab-ingress/controller/pkg/api/router/v1"
@@ -55,11 +56,21 @@ type GRPCClient struct {
 	client routerv1.RouterServiceClient
 }
 
-func NewClient(addr string, tokenPath string) (*GRPCClient, error) {
-	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-	if tokenPath != "" {
-		opts = append(opts, grpc.WithPerRPCCredentials(&tokenFileCredentials{tokenPath: tokenPath}))
+func NewClient(addr string, tokenPath string, caPath string) (*GRPCClient, error) {
+	pool := x509.NewCertPool()
+	caData, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("read CA cert %q: %w", caPath, err)
 	}
+	if !pool.AppendCertsFromPEM(caData) {
+		return nil, fmt.Errorf("no valid CA cert in %q", caPath)
+	}
+	tlsCfg := &tls.Config{
+		RootCAs:    pool,
+		MinVersion: tls.VersionTLS12,
+	}
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
+	opts = append(opts, grpc.WithPerRPCCredentials(&tokenFileCredentials{tokenPath: tokenPath}))
 	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("dial router service: %w", err)
@@ -87,7 +98,7 @@ func (t *tokenFileCredentials) GetRequestMetadata(_ context.Context, _ ...string
 	}, nil
 }
 
-func (t *tokenFileCredentials) RequireTransportSecurity() bool { return false }
+func (t *tokenFileCredentials) RequireTransportSecurity() bool { return true }
 
 var _ credentials.PerRPCCredentials = (*tokenFileCredentials)(nil)
 

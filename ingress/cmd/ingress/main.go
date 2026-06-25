@@ -4,17 +4,23 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/vranyes/homelab-ingress/ingress/internal/auth"
+	"github.com/vranyes/homelab-ingress/ingress/internal/certgen"
 	"github.com/vranyes/homelab-ingress/ingress/internal/config"
 	"github.com/vranyes/homelab-ingress/ingress/internal/dhcp"
 	"github.com/vranyes/homelab-ingress/ingress/internal/macvlan"
@@ -62,30 +68,59 @@ func main() {
 	srv := service.NewRouterServer(st, logger)
 	srv.ActiveMacvlanFunc = linkMgr.ActiveCount
 
+	// Load or create a root CA and generate a leaf TLS certificate for the server.
+	certDir := filepath.Dir(*configPath)
+	serverNames := []string{stripPort(cfg.GRPC.Listen)}
+	tlsCert, caPEM, err := certgen.LoadOrCreate(certDir, serverNames)
+	if err != nil {
+		logger.Error("failed to load or create TLS certificate", "error", err)
+		os.Exit(1)
+	}
+
+	// Write the CA PEM so clients can pick it up.
+	caOut := filepath.Join(certDir, "ca.pem")
+	if _, err := os.Stat(caOut); os.IsNotExist(err) {
+		if err := os.WriteFile(caOut, caPEM, 0644); err != nil {
+			logger.Error("failed to write CA certificate", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("CA certificate written", "path", caOut)
+	}
+
+	// Always use TLS for the gRPC server.
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{*tlsCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	opts := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}
+
+	// Load custom root CA for the OIDC issuer if configured.
+	var trustedRoot *x509.CertPool
+	if cfg.Auth.TrustedRoot != "" {
+		trustedRoot, err = certgen.LoadCACert(cfg.Auth.TrustedRoot)
+		if err != nil {
+			logger.Error("failed to load trusted root CA for OIDC issuer", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	unary, stream, err := auth.NewInterceptors(context.Background(), cfg.Auth.Issuer, cfg.Auth.Audience, cfg.Auth.AllowedSubjects, trustedRoot, logger)
+	if err != nil {
+		logger.Error("failed to initialize auth", "error", err)
+		os.Exit(1)
+	}
+	opts = append(opts, grpc.UnaryInterceptor(unary), grpc.StreamInterceptor(stream))
+
+	grpcServer := grpc.NewServer(opts...)
+	routerv1.RegisterRouterServiceServer(grpcServer, srv)
+
 	listener, err := net.Listen("tcp", cfg.GRPC.Listen)
 	if err != nil {
 		logger.Error("failed to listen", "error", err)
 		os.Exit(1)
 	}
-
-	// Configure gRPC server options, including auth interceptors when configured
-	var opts []grpc.ServerOption
-	if cfg.Auth.Issuer != "" {
-		unary, stream, err := auth.NewInterceptors(context.Background(), cfg.Auth.Issuer, cfg.Auth.Audience, cfg.Auth.AllowedSubjects, logger)
-		if err != nil {
-			logger.Error("failed to initialize auth", "error", err)
-			os.Exit(1)
-		}
-		if unary != nil {
-			opts = append(opts, grpc.UnaryInterceptor(unary), grpc.StreamInterceptor(stream))
-		}
-	}
-
-	grpcServer := grpc.NewServer(opts...)
-	routerv1.RegisterRouterServiceServer(grpcServer, srv)
-
+	logger.Info("gRPC server started with TLS", "listen", cfg.GRPC.Listen)
 	go func() {
-		logger.Info("gRPC server started", "listen", cfg.GRPC.Listen)
 		if err := grpcServer.Serve(listener); err != nil {
 			logger.Error("gRPC server error", "error", err)
 			os.Exit(1)
@@ -142,4 +177,12 @@ func loadState(logger *slog.Logger, baseIface string) (*state.State, error) {
 
 	logger.Info("state initialized", "restored_services", len(st.Services))
 	return st, nil
+}
+
+func stripPort(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return strings.TrimSpace(host)
 }

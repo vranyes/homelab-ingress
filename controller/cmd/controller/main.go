@@ -30,11 +30,13 @@ func main() {
 	var pollInterval time.Duration
 	var metricsAddr string
 	var tokenPath string
+	var caPath string
 
 	flag.StringVar(&routerAddr, "router-addr", config.DefaultRouterAddr, "Router service gRPC address")
 	flag.DurationVar(&pollInterval, "poll-interval", config.DefaultPollInterval, "Interval for polling IP changes")
 	flag.StringVar(&metricsAddr, "metrics-addr", config.DefaultMetricsAddr, "Metrics bind address")
 	flag.StringVar(&tokenPath, "token-path", "", "Path to a Bearer token file for router service authentication")
+	flag.StringVar(&caPath, "ca-path", "", "Path to CA certificate for verifying router service TLS")
 	flag.Parse()
 
 	cfg := config.Config{
@@ -42,6 +44,7 @@ func main() {
 		PollInterval: pollInterval,
 		MetricsAddr:  metricsAddr,
 		TokenPath:    tokenPath,
+		CAPath:       caPath,
 	}
 
 	if err := config.Validate(cfg); err != nil {
@@ -57,7 +60,7 @@ func main() {
 
 	setupLog := ctrl.Log.WithName("setup")
 
-	routerClient, err := router.NewClient(cfg.RouterAddr, cfg.TokenPath)
+	routerClient, err := router.NewClient(cfg.RouterAddr, cfg.TokenPath, cfg.CAPath)
 	if err != nil {
 		setupLog.Error(err, "failed to create router client")
 		os.Exit(1)

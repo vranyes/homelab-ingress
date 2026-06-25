@@ -2,12 +2,16 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"net/http"
 	"strings"
 	"time"
 
 	"log/slog"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -35,13 +39,19 @@ func SubjectFromContext(ctx context.Context) (string, bool) {
 // incoming requests carry a Bearer token signed by the given OIDC issuer and
 // that the `sub` claim is present in the allowedSubjects list.
 // When audience is non-empty, the token's aud claim must contain it.
-// If issuer is empty, nil interceptors are returned.
-func NewInterceptors(ctx context.Context, issuer, audience string, allowedSubjects []string, logger *slog.Logger) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor, error) {
-	if issuer == "" {
-		return nil, nil, nil
+// trustedRoot is an optional cert pool to use when connecting to the OIDC
+// issuer; if nil, the system pool is used.
+func NewInterceptors(ctx context.Context, issuer, audience string, allowedSubjects []string, trustedRoot *x509.CertPool, logger *slog.Logger) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor, error) {
+	if trustedRoot != nil {
+		hc := &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{RootCAs: trustedRoot},
+			},
+		}
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, hc)
 	}
 
-	// Initialize OIDC provider and verifier
 	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
 		return nil, nil, err

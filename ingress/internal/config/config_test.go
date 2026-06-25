@@ -11,7 +11,10 @@ func TestLoadConfig(t *testing.T) {
 		dir := t.TempDir()
 		cfgPath := filepath.Join(dir, "config.yaml")
 		content := `base_interface: wan.201
-state_file: /var/lib/homelab-ingress/allocations.json
+auth:
+  issuer: https://issuer.example.com
+  allowed_subjects:
+  - test-subject
 grpc:
   listen: "0.0.0.0:50051"
 `
@@ -29,6 +32,9 @@ grpc:
 		}
 		if cfg.GRPC.Listen != "0.0.0.0:50051" {
 			t.Errorf("expected grpc.listen 0.0.0.0:50051, got %q", cfg.GRPC.Listen)
+		}
+		if cfg.Auth.Issuer != "https://issuer.example.com" {
+			t.Errorf("expected issuer, got %q", cfg.Auth.Issuer)
 		}
 	})
 
@@ -56,6 +62,10 @@ grpc:
 		dir := t.TempDir()
 		cfgPath := filepath.Join(dir, "config.yaml")
 		content := `base_interface: eth0
+auth:
+  issuer: https://issuer.example.com
+  allowed_subjects:
+  - test-subject
 `
 		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
 			t.Fatal(err)
@@ -75,6 +85,10 @@ grpc:
 		dir := t.TempDir()
 		cfgPath := filepath.Join(dir, "config.yaml")
 		content := `base_interface: ""
+auth:
+  issuer: https://issuer.example.com
+  allowed_subjects:
+  - test-subject
 `
 		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
 			t.Fatal(err)
@@ -96,4 +110,40 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.GRPC.Listen != DefaultGRPCListen {
 		t.Errorf("expected grpc.listen %q, got %q", DefaultGRPCListen, cfg.GRPC.Listen)
 	}
+}
+
+func TestLoadConfig_Validation(t *testing.T) {
+	t.Run("returns error when auth.issuer is missing", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "config.yaml")
+		content := `base_interface: eth0
+auth:
+  allowed_subjects:
+  - test
+`
+		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadConfig(cfgPath)
+		if err == nil {
+			t.Fatal("expected error for missing issuer, got nil")
+		}
+	})
+
+	t.Run("returns error when auth.allowed_subjects is empty", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "config.yaml")
+		content := `base_interface: eth0
+auth:
+  issuer: https://issuer.example.com
+  allowed_subjects:
+`
+		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadConfig(cfgPath)
+		if err == nil {
+			t.Fatal("expected error for empty allowed_subjects, got nil")
+		}
+	})
 }

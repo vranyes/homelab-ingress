@@ -2,15 +2,25 @@ package router
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
 	routerv1 "github.com/vranyes/homelab-ingress/controller/pkg/api/router/v1"
@@ -117,22 +127,108 @@ func (f *fakeServer) Health(_ context.Context, _ *routerv1.HealthRequest) (*rout
 	}, nil
 }
 
-func startFakeServer(t *testing.T, srv *fakeServer) string {
+func generateTestCert(t *testing.T) (*tls.Config, []byte) {
+	t.Helper()
+
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ca key: %v", err)
+	}
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	caTmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "Test CA"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:         true,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create ca: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse ca: %v", err)
+	}
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate leaf key: %v", err)
+	}
+	serial, _ = rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	leafTmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create leaf: %v", err)
+	}
+
+	serverTLS := &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{leafDER, caDER},
+			PrivateKey:  leafKey,
+		}},
+		MinVersion: tls.VersionTLS12,
+	}
+
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	return serverTLS, caPEM
+}
+
+func startFakeServerTLS(t *testing.T, srv *fakeServer) (addr string, caPEM []byte) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
-	gs := grpc.NewServer()
+	tlsCfg, caPEM := generateTestCert(t)
+	gs := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)))
 	routerv1.RegisterRouterServiceServer(gs, srv)
 	go gs.Serve(lis)
 	t.Cleanup(gs.Stop)
-	return lis.Addr().String()
+	return lis.Addr().String(), caPEM
 }
 
-func newTestClient(t *testing.T, addr string) *GRPCClient {
+func newTestClient(t *testing.T, addr string, caPEM []byte) *GRPCClient {
 	t.Helper()
-	c, err := NewClient(addr, "")
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0644); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	tokenPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0644); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	c, err := NewClient(addr, tokenPath, caPath)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+func newTestClientWithToken(t *testing.T, addr string, caPEM []byte, token string) *GRPCClient {
+	t.Helper()
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0644); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	tokenPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenPath, []byte(token), 0644); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	c, err := NewClient(addr, tokenPath, caPath)
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
@@ -142,8 +238,8 @@ func newTestClient(t *testing.T, addr string) *GRPCClient {
 
 func TestClient_Create(t *testing.T) {
 	fake := newFakeServer()
-	addr := startFakeServer(t, fake)
-	client := newTestClient(t, addr)
+	addr, caPEM := startFakeServerTLS(t, fake)
+	client := newTestClient(t, addr, caPEM)
 
 	t.Run("creates load balancer", func(t *testing.T) {
 		ports := []PortMapping{
@@ -174,8 +270,8 @@ func TestClient_Create(t *testing.T) {
 
 func TestClient_Update(t *testing.T) {
 	fake := newFakeServer()
-	addr := startFakeServer(t, fake)
-	client := newTestClient(t, addr)
+	addr, caPEM := startFakeServerTLS(t, fake)
+	client := newTestClient(t, addr, caPEM)
 
 	fake.services["default/myapp"] = &routerv1.GetLoadBalancerResponse{
 		ServiceKey: "default/myapp",
@@ -215,8 +311,8 @@ func TestClient_Update(t *testing.T) {
 
 func TestClient_Delete(t *testing.T) {
 	fake := newFakeServer()
-	addr := startFakeServer(t, fake)
-	client := newTestClient(t, addr)
+	addr, caPEM := startFakeServerTLS(t, fake)
+	client := newTestClient(t, addr, caPEM)
 
 	fake.services["default/myapp"] = &routerv1.GetLoadBalancerResponse{
 		ServiceKey:    "default/myapp",
@@ -249,8 +345,8 @@ func TestClient_Delete(t *testing.T) {
 
 func TestClient_Get(t *testing.T) {
 	fake := newFakeServer()
-	addr := startFakeServer(t, fake)
-	client := newTestClient(t, addr)
+	addr, caPEM := startFakeServerTLS(t, fake)
+	client := newTestClient(t, addr, caPEM)
 
 	fake.services["default/myapp"] = &routerv1.GetLoadBalancerResponse{
 		ServiceKey: "default/myapp",
@@ -295,8 +391,8 @@ func TestClient_Get(t *testing.T) {
 
 func TestClient_List(t *testing.T) {
 	fake := newFakeServer()
-	addr := startFakeServer(t, fake)
-	client := newTestClient(t, addr)
+	addr, caPEM := startFakeServerTLS(t, fake)
+	client := newTestClient(t, addr, caPEM)
 
 	fake.services["default/app1"] = &routerv1.GetLoadBalancerResponse{
 		ServiceKey:    "default/app1",
@@ -348,8 +444,8 @@ func TestClient_List(t *testing.T) {
 
 func TestClient_Health(t *testing.T) {
 	fake := newFakeServer()
-	addr := startFakeServer(t, fake)
-	client := newTestClient(t, addr)
+	addr, caPEM := startFakeServerTLS(t, fake)
+	client := newTestClient(t, addr, caPEM)
 
 	t.Run("returns healthy status", func(t *testing.T) {
 		h, err := client.Health(context.Background())
@@ -377,8 +473,18 @@ func TestClient_Health(t *testing.T) {
 
 func TestClient_Close(t *testing.T) {
 	fake := newFakeServer()
-	addr := startFakeServer(t, fake)
-	client, err := NewClient(addr, "")
+	addr, caPEM := startFakeServerTLS(t, fake)
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0644); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	tokenPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0644); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	client, err := NewClient(addr, tokenPath, caPath)
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
@@ -472,10 +578,10 @@ func TestTokenFileCredentials(t *testing.T) {
 		}
 	})
 
-	t.Run("does not require transport security", func(t *testing.T) {
+	t.Run("requires transport security", func(t *testing.T) {
 		creds := &tokenFileCredentials{tokenPath: "/any"}
-		if creds.RequireTransportSecurity() {
-			t.Error("expected RequireTransportSecurity to return false")
+		if !creds.RequireTransportSecurity() {
+			t.Error("expected RequireTransportSecurity to return true")
 		}
 	})
 }

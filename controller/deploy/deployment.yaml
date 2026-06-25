@@ -25,6 +25,7 @@ spec:
         - --poll-interval=$(POLL_INTERVAL)
         - --metrics-addr=:8080
         - --token-path=/var/run/secrets/homelab-ingress/token
+        - --ca-path=/etc/homelab-ingress/ca.pem
         env:
         - name: ROUTER_ADDR
           valueFrom:
@@ -61,6 +62,9 @@ spec:
         - name: router-token
           mountPath: /var/run/secrets/homelab-ingress
           readOnly: true
+        - name: router-ca
+          mountPath: /etc/homelab-ingress
+          readOnly: true
       volumes:
       - name: router-token
         projected:
@@ -69,3 +73,9 @@ spec:
               path: token
               expirationSeconds: 3600
               audience: homelab-ingress-ingress
+      - name: router-ca
+        configMap:
+          name: homelab-ingress-ca
+          items:
+          - key: ca.pem
+            path: ca.pem
