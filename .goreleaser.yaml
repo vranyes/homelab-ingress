@@ -1,10 +1,14 @@
 ---
+archives:
+- files:
+  - none*
+  format: binary
 builds:
 - binary: controller
   env:
   - CGO_ENABLED=0
   flags:
-  - '-trimpath'
+  - "-trimpath"
   goarch:
   - arm64
   - amd64
@@ -12,13 +16,13 @@ builds:
   - linux
   id: controller
   ldflags:
-  - '-s -w'
+  - "-s -w"
   main: ./controller/cmd/controller
 - binary: ingress
   env:
   - CGO_ENABLED=0
   flags:
-  - '-trimpath'
+  - "-trimpath"
   goarch:
   - arm64
   - amd64
@@ -26,13 +30,13 @@ builds:
   - linux
   id: ingress
   ldflags:
-  - '-s -w'
+  - "-s -w"
   main: ./ingress/cmd/ingress
 - binary: hictl
   env:
   - CGO_ENABLED=0
   flags:
-  - '-trimpath'
+  - "-trimpath"
   goarch:
   - arm64
   - amd64
@@ -41,7 +45,7 @@ builds:
   - linux
   id: hictl
   ldflags:
-  - '-s -w'
+  - "-s -w"
   main: ./ingress/cmd/hictl
 kos:
 - build: controller
@@ -53,29 +57,6 @@ kos:
   - ghcr.io/vranyes/homelab-ingress/controller
   tags:
   - '{{.Commit}}'
-  - v{{.Tag}}
-nfpms:
-- contents:
-  - dst: /etc/init.d/homelab-ingress
-    file_info:
-      mode: 700
-    src: files/homelab-ingress.init
-  - dst: /etc/config/homelab-ingress
-    src: files/homelab-ingress.config
-  formats:
-  - apk
-  id: ingress-openwrt-cortex-a53
-  ids:
-  - ingress
-  maintainer: Josiah Vranyes
-  package_name: homelab-ingress
-  recommends: []
-  suggests: []
-  conflicts: []
-  replaces: []
-  dependencies:
-  - procd
-  - uci
-
+  - 'v{{.Tag}}'
 project_name: homelab-ingress
 version: 2

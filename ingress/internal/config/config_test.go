@@ -13,6 +13,7 @@ func TestLoadConfig(t *testing.T) {
 		content := `base_interface: wan.201
 auth:
   issuer: https://issuer.example.com
+  audience: https://api.example.com
   allowed_subjects:
   - test-subject
 grpc:
@@ -64,6 +65,7 @@ grpc:
 		content := `base_interface: eth0
 auth:
   issuer: https://issuer.example.com
+  audience: https://api.example.com
   allowed_subjects:
   - test-subject
 `
@@ -118,8 +120,9 @@ func TestLoadConfig_Validation(t *testing.T) {
 		cfgPath := filepath.Join(dir, "config.yaml")
 		content := `base_interface: eth0
 auth:
+  audience: https://api.example.com
   allowed_subjects:
-  - test
+  - test-subject
 `
 		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
 			t.Fatal(err)
@@ -136,6 +139,7 @@ auth:
 		content := `base_interface: eth0
 auth:
   issuer: https://issuer.example.com
+  audience: https://api.example.com
   allowed_subjects:
 `
 		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {

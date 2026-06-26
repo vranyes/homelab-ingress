@@ -1,0 +1,26 @@
+---
+apk:
+  arch: aarch64_cortex-a53
+arch: arm64
+contents:
+- dst: /usr/bin/homelab-ingress
+  file_info:
+    mode: 755
+  src: dist/ingress_linux_arm64_v8.0/ingress
+- dst: /etc/init.d/homelab-ingress
+  file_info:
+    mode: 700
+  src: files/homelab-ingress.init
+- dst: /etc/config/homelab-ingress
+  file_info:
+    mode: 644
+  src: files/homelab-ingress.config
+depends:
+- procd
+- uci
+description: Homelab ingress controller for OpenWrt devices.
+license: GPL-3.0
+maintainer: Josiah Vranyes
+name: homelab-ingress
+platform: linux
+version: ${VERSION}
