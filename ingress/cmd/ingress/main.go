@@ -60,7 +60,11 @@ func main() {
 	defer dhcpMgr.StopAll()
 	defer dhcpMgr.Stop()
 
-	iml := nftables.NewManager(logger)
+	var nftOpts []nftables.Option
+	for _, r := range cfg.Masquerade {
+		nftOpts = append(nftOpts, nftables.WithMasquerade(r.InputDevice, r.OutputDevice))
+	}
+	iml := nftables.NewManager(logger, nftOpts...)
 	rmgr := router.NewManager(iml, st, logger)
 	go rmgr.Run(st.Subscribe())
 

@@ -20,7 +20,12 @@ type Manager struct {
 	logger *slog.Logger
 }
 
-func NewManager(logger *slog.Logger) *Manager {
+func NewManager(logger *slog.Logger, opts ...Option) *Manager {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	conn, err := nftables.New(nftables.WithSockOptions(func(conn *netlink.Conn) error {
 		return conn.SetOption(netlink.ExtendedAcknowledge, true)
 	}))
@@ -81,7 +86,7 @@ func NewManager(logger *slog.Logger) *Manager {
 
 	// Adds postrouting chain
 	// type nat hook postrouting priority srcnat; policy accept;
-	conn.AddChain(&nftables.Chain{
+	postChain := conn.AddChain(&nftables.Chain{
 		Name:     "postrouting",
 		Table:    table,
 		Hooknum:  nftables.ChainHookPostrouting,
@@ -90,13 +95,19 @@ func NewManager(logger *slog.Logger) *Manager {
 		Policy:   &acceptPolicy,
 	})
 
-	// Adds the rule
-	// `ct status dnat masquerade`
-	// conn.AddRule(&nftables.Rule{
-	// 	Table: table,
-	// 	Chain: postChain,
-	// 	Exprs: buildMasqueradeExprs(CtStatusDNAT),
-	// })
+	// Adds masquerade rules to the postrouting chain
+	// `iifname "inDev" oifname "outDev" ct status dnat masquerade`
+	for _, mr := range o.masqueradeRules {
+		logger.Info("adding masquerade rule",
+			"input_device", mr.InputDevice,
+			"output_device", mr.OutputDevice,
+		)
+		conn.AddRule(&nftables.Rule{
+			Table: table,
+			Chain: postChain,
+			Exprs: buildMasqueradeWithDevicesExprs(mr.InputDevice, mr.OutputDevice),
+		})
+	}
 
 	if err := conn.Flush(); err != nil {
 		logger.Error("failed to flush nftables rules", "error", err)

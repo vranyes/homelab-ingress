@@ -12,13 +12,19 @@ const (
 )
 
 type Config struct {
-	BaseInterface string `yaml:"base_interface"`
-	GRPC          GRPC   `yaml:"grpc"`
-	Auth          Auth   `yaml:"auth"`
+	BaseInterface string           `yaml:"base_interface"`
+	GRPC          GRPC             `yaml:"grpc"`
+	Auth          Auth             `yaml:"auth"`
+	Masquerade    []MasqueradeRule `yaml:"masquerade"`
 }
 
 type GRPC struct {
 	Listen string `yaml:"listen"`
+}
+
+type MasqueradeRule struct {
+	InputDevice  string `yaml:"input_device"`
+	OutputDevice string `yaml:"output_device"`
 }
 
 type Auth struct {

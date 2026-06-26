@@ -15,3 +15,11 @@ auth:
 base_interface: wan
 grpc:
   listen: 0.0.0.0:50051
+
+# Masquerade rules for same-L2 traffic between VLANs.
+# Each entry generates: iifname "input" oifname "output" ct status dnat masquerade
+# masquerade:
+#   - input_device: br-lan.10
+#     output_device: br-lan.20
+#   - input_device: br-lan.30
+#     output_device: br-lan.40

@@ -14,9 +14,14 @@ AUTH_ISSUER=
 AUTH_AUDIENCE=
 AUTH_ALLOWED_SUBJECTS=
 AUTH_TRUSTED_ROOT_CA=
+MASQUERADE_RULES=
 
 append_subject() {
 	AUTH_ALLOWED_SUBJECTS="${AUTH_ALLOWED_SUBJECTS} ${1}"
+}
+
+append_masquerade() {
+	MASQUERADE_RULES="${MASQUERADE_RULES} ${1}"
 }
 
 generate_config() {
@@ -38,6 +43,16 @@ generate_config() {
 				echo "    - ${subj}"
 			done
 		fi
+
+		if [ -n "${MASQUERADE_RULES}" ]; then
+			echo "masquerade:"
+			for rule in ${MASQUERADE_RULES}; do
+				input="${rule%%,*}"
+				output="${rule#*,}"
+				echo "  - input_device: ${input}"
+				echo "    output_device: ${output}"
+			done
+		fi
 	} > "${GENERATED_CONFIG}"
 }
 
@@ -52,6 +67,9 @@ start_service() {
 
 	AUTH_ALLOWED_SUBJECTS=
 	config_list_foreach config auth_allowed_subjects append_subject
+
+	MASQUERADE_RULES=
+	config_list_foreach config masquerade append_masquerade
 
 	if [ -z "${BASE_INTERFACE}" ]; then
 		echo "Cannot start ${NAME}: base_interface is required (set via UCI)" >&2

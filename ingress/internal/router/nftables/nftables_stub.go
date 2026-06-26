@@ -12,7 +12,7 @@ type Manager struct {
 	logger *slog.Logger
 }
 
-func NewManager(logger *slog.Logger) *Manager { return &Manager{logger: logger} }
+func NewManager(logger *slog.Logger, _ ...Option) *Manager { return &Manager{logger: logger} }
 
 func (m *Manager) AddRules(svc state.LBService) error {
 	return validateService(svc)

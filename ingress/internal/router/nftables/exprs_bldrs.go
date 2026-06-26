@@ -31,6 +31,49 @@ func buildCtStatusAcceptExprs(statusBits uint32) []expr.Any {
 	}
 }
 
+// buildMasqueradeWithDevicesExprs returns expressions for:
+//
+//	iifname "inputDev" oifname "outputDev" ct status dnat masquerade
+//
+// Masquerade rewrites the source address of forwarded packets to the router's
+// outbound IP. The iifname/oifname guards restrict this to traffic crossing
+// between specific interfaces (same-L2 or routed), while ct status dnat
+// ensures only packets belonging to DNAT'd connections are affected.
+func buildMasqueradeWithDevicesExprs(inputDev, outputDev string) []expr.Any {
+	return []expr.Any{
+		// iifname "inputDev"
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     []byte(inputDev + "\x00"),
+		},
+		// oifname "outputDev"
+		&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     []byte(outputDev + "\x00"),
+		},
+		// ct status dnat
+		&expr.Ct{Key: expr.CtKeySTATUS, Register: 1},
+		&expr.Bitwise{
+			SourceRegister: 1,
+			DestRegister:   1,
+			Len:            4,
+			Mask:           binaryutil.NativeEndian.PutUint32(CtStatusDNAT),
+			Xor:            binaryutil.NativeEndian.PutUint32(0),
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpNeq,
+			Register: 1,
+			Data:     binaryutil.NativeEndian.PutUint32(0),
+		},
+		// masquerade
+		&expr.Masq{},
+	}
+}
+
 // buildMasqueradeExprs returns expressions for:
 //
 //	ct status <type> masquerade
