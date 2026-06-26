@@ -35,6 +35,15 @@ func (m *NetlinkManager) Create(iface, parent string, mac net.HardwareAddr) erro
 		return fmt.Errorf("failed to find parent interface %q: %w", parent, err)
 	}
 
+	parentAttrs := parentLink.Attrs()
+	if parentAttrs.Flags&net.FlagUp == 0 {
+		m.logger.Info("parent interface is down, bringing it up", "parent", parent)
+		if err := netlink.LinkSetUp(parentLink); err != nil {
+			m.logger.Error("failed to set parent interface up", "parent", parent, "error", err)
+			return fmt.Errorf("failed to set parent interface %q up: %w", parent, err)
+		}
+	}
+
 	mv := &netlink.Macvlan{
 		LinkAttrs: netlink.LinkAttrs{
 			Name:         iface,
@@ -65,6 +74,13 @@ func (m *NetlinkManager) Delete(iface string) error {
 		}
 		m.logger.Error("failed to find interface", "interface", iface, "error", err)
 		return fmt.Errorf("failed to find interface %q: %w", iface, err)
+	}
+
+	if link.Attrs().Flags&net.FlagUp != 0 {
+		m.logger.Debug("setting interface down before delete", "interface", iface)
+		if err := netlink.LinkSetDown(link); err != nil {
+			m.logger.Warn("failed to set interface down before delete", "interface", iface, "error", err)
+		}
 	}
 
 	if err := netlink.LinkDel(link); err != nil {
@@ -243,6 +259,38 @@ func (m *NetlinkManager) ActiveCount() int32 {
 		}
 	}
 	return count
+}
+
+func (m *NetlinkManager) DeleteAll() {
+	m.logger.Info("deleting all macvlan interfaces")
+
+	snap := m.st.Clone()
+
+	for _, svc := range snap.Services {
+		ifname := svc.GetInterfaceName()
+		if ifname == "" {
+			continue
+		}
+		if err := m.Delete(ifname); err != nil {
+			m.logger.Error("failed to delete macvlan interface during cleanup", "interface", ifname, "error", err)
+		}
+	}
+}
+
+func (m *NetlinkManager) ParentSetDown() {
+	m.logger.Info("setting parent interface down", "parent", m.st.BaseIface)
+	link, err := netlink.LinkByName(m.st.BaseIface)
+	if err != nil {
+		m.logger.Error("failed to find parent interface", "parent", m.st.BaseIface, "error", err)
+		return
+	}
+	if link.Attrs().Flags&net.FlagUp == 0 {
+		m.logger.Debug("parent interface already down", "parent", m.st.BaseIface)
+		return
+	}
+	if err := netlink.LinkSetDown(link); err != nil {
+		m.logger.Error("failed to set parent interface down", "parent", m.st.BaseIface, "error", err)
+	}
 }
 
 func (m *NetlinkManager) reconcile() {

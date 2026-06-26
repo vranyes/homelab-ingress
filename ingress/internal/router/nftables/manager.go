@@ -271,6 +271,23 @@ func (m *Manager) RemoveRules(serviceKey string) error {
 	return m.conn.Flush()
 }
 
+// Cleanup removes the entire nftables table and all its rules.
+func (m *Manager) Cleanup() {
+	if m.conn == nil {
+		return
+	}
+	table, err := m.findTable()
+	if err != nil {
+		m.logger.Debug("nftables table not found for cleanup", "error", err)
+		return
+	}
+	m.logger.Info("cleaning up nftables table", "table", tableName)
+	m.conn.DelTable(table)
+	if err := m.conn.Flush(); err != nil {
+		m.logger.Error("failed to flush nftables table deletion", "error", err)
+	}
+}
+
 // -- internal helpers --
 
 func (m *Manager) findTable() (*nftables.Table, error) {

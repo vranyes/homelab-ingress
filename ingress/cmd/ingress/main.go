@@ -137,6 +137,12 @@ func main() {
 	logger.Info("received signal, shutting down", "signal", sig)
 
 	grpcServer.GracefulStop()
+	logger.Info("gRPC server stopped, cleaning up")
+
+	iml.Cleanup()
+	linkMgr.DeleteAll()
+	linkMgr.ParentSetDown()
+
 	logger.Info("shutdown complete")
 }
 
