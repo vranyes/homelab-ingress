@@ -43,29 +43,6 @@ func buildRoundRobinExprs(
 		return nil, fmt.Errorf("dst must have at least one entry")
 	}
 
-	// ── 1. Build the numgen→(ipv4_addr . inet_service) map ────────────────
-	//
-	// Key:   TypeMark   (4 bytes, network-byte-order uint32: 0, 1, 2, …)
-	// Value: TypeIPAddr . TypeInetService
-	//          [0:4]  IPv4 address  (4 bytes, network order)
-	//          [4:6]  port          (2 bytes, big-endian)
-	//          [6:8]  zero-padding  (inet_service padded to 4 bytes in concat)
-	//
-	// NOTE: using TypeMark rather than TypeInteger because the kernel expects
-	// integer-type keys in host byte order, but the nftables Go library
-	// encodes them with BigEndian. On little-endian (x86) hardware, element 1
-	// gets stored as 0x01000000 (16777216) while numgen outputs 1 → lookup
-	// fails → packet misses DNAT. TypeMark uses network byte order, which
-	// matches BigEndian encoding.
-	lbMap := &nftables.Set{
-		Table:    table,
-		Name:     fmt.Sprintf("map_%s_%d", sname, port),
-		Constant: false,
-		IsMap:    true,
-		KeyType:  nftables.TypeMark,
-		DataType: nftables.MustConcatSetType(nftables.TypeIPAddr, nftables.TypeInetService),
-	}
-
 	// Sort IPs so index→backend assignment is deterministic across calls.
 	ips := make([]string, 0, len(dst))
 	for ip := range dst {
@@ -93,9 +70,52 @@ func buildRoundRobinExprs(
 		})
 	}
 
-	// AddSet populates lbMap.ID, which the Lookup expr below must reference.
-	if err := c.AddSet(lbMap, elements); err != nil {
-		return nil, fmt.Errorf("AddSet: %w", err)
+	// ── 1. Build the numgen→(ipv4_addr . inet_service) map ────────────────
+	//
+	// Key:   TypeMark   (4 bytes, network-byte-order uint32: 0, 1, 2, …)
+	// Value: TypeIPAddr . TypeInetService
+	//          [0:4]  IPv4 address  (4 bytes, network order)
+	//          [4:6]  port          (2 bytes, big-endian)
+	//          [6:8]  zero-padding  (inet_service padded to 4 bytes in concat)
+	//
+	// NOTE: using TypeMark rather than TypeInteger because the kernel expects
+	// integer-type keys in host byte order, but the nftables Go library
+	// encodes them with BigEndian. On little-endian (x86) hardware, element 1
+	// gets stored as 0x01000000 (16777216) while numgen outputs 1 → lookup
+	// fails → packet misses DNAT. TypeMark uses network byte order, which
+	// matches BigEndian encoding.
+
+	var lbMap *nftables.Set
+	n := fmt.Sprintf("map_%s_%d", sname, port)
+	// If the set already exists (e.g. rule update), delete the old one
+	// before recreating it. This avoids EEXIST on batch flush.
+	existingSets, err := c.GetSets(table)
+	if err != nil {
+		return nil, fmt.Errorf("get sets: %w", err)
+	}
+	for _, s := range existingSets {
+		if s.Name == n {
+			lbMap = s
+			c.FlushSet(lbMap)
+			if err := c.SetAddElements(lbMap, elements); err != nil {
+				return nil, fmt.Errorf("SetAddElements: %w", err)
+			}
+			break
+		}
+	}
+	if lbMap == nil {
+		lbMap = &nftables.Set{
+			Table:    table,
+			Name:     fmt.Sprintf("map_%s_%d", sname, port),
+			Constant: false,
+			IsMap:    true,
+			KeyType:  nftables.TypeMark,
+			DataType: nftables.MustConcatSetType(nftables.TypeIPAddr, nftables.TypeInetService),
+		}
+		// AddSet populates lbMap.ID, which the Lookup expr below must reference.
+		if err := c.AddSet(lbMap, elements); err != nil {
+			return nil, fmt.Errorf("AddSet: %w", err)
+		}
 	}
 
 	// ── 2. Resolve protocol ────────────────────────────────────────────────
@@ -112,11 +132,35 @@ func buildRoundRobinExprs(
 		return nil, fmt.Errorf("unsupported protocol %q (want \"tcp\" or \"udp\")", protocol)
 	}
 
-	// ── 3. Expression pipeline ─────────────────────────────────────────────
+	// ── 3. Compute register layout for concat value ─────────────────────
+	//
+	// The concat value (ipv4_addr . inet_service) is 8 bytes stored
+	// across consecutive 4-byte registers. Count how many register slots
+	// the components before the port (the last component) occupy so we
+	// can compute the port register offset relative to the base.
+	//
+	// Kernel register numbering (include/uapi/linux/netfilter/nf_tables.h):
+	//   NFT_REG32_00 = 0x8   — first 32-bit (4-byte) data register
+	//   NFT_REG32_01 = 0x9   — second 32-bit data register
+	//
+	// Using the NFT_REG32_* space avoids the non-linear mapping that
+	// nft_parse_register() applies to legacy registers (NFT_REG_1..4).
+	const regBase = 0x8 // NFT_REG32_00
+
+	components := nftables.ConcatSetTypeElements(lbMap.DataType)
+	regSlots := uint32(0)
+	for i := 0; i < len(components)-1; i++ {
+		// Each component is padded to a 4-byte register boundary.
+		regSlots += (components[i].Bytes + 3) / 4 // ceil(Bytes / 4)
+	}
+	regProto := regBase + regSlots
+
+	// ── 4. Expression pipeline ─────────────────────────────────────────────
 	//
 	// Register plan:
-	//   reg 1  scratch → numgen output → after Lookup: dest IPv4 address
-	//   reg 2  after Lookup: dest port (concat value spills into reg 2)
+	//   reg 1    scratch for payload/meta/numgen expressions
+	//   reg 8    after Lookup: dest IPv4 address (NFT_REG32_00)
+	//   reg 9    after Lookup: dest port (NFT_REG32_01)
 	//
 	//   payload(net hdr, off=16, len=4) → reg1 = daddr
 	//   cmp eq reg1 extIP
@@ -125,8 +169,8 @@ func buildRoundRobinExprs(
 	//   payload(trans hdr, off=2, len=2)→ reg1 = dport
 	//   cmp eq reg1 port
 	//   numgen inc mod N                → reg1 = 0..N-1
-	//   lookup src=reg1 → lbMap        → reg1=addr, reg2=port
-	//   nat dnat addr=reg1, proto=reg2
+	//   lookup src=reg1 → lbMap        → reg8=addr, reg9=port
+	//   nat dnat addr=reg8, proto=reg9
 
 	return []expr.Any{
 		// ip daddr <extIP>
@@ -170,25 +214,25 @@ func buildRoundRobinExprs(
 			Type:     unix.NFT_NG_INCREMENTAL,
 		},
 
-		// map lookup → reg1 (addr) + reg2 (port)
+		// map lookup → regBase (addr) + regProto (port)
 		// IsDestRegSet=true → map lookup (vs plain membership test)
 		// concat value written across consecutive registers
 		&expr.Lookup{
 			SourceRegister: 0x1,
-			DestRegister:   0x1,
+			DestRegister:   regBase,
 			IsDestRegSet:   true,
 			SetName:        lbMap.Name,
 			SetID:          lbMap.ID,
 		},
 
-		// dnat to reg1:reg2
+		// dnat to regBase:regProto
 		// RegAddrMin==RegAddrMax and RegProtoMin==RegProtoMax → single
 		// destination, not a range.
 		&expr.NAT{
 			Type:        expr.NATTypeDestNAT,
 			Family:      unix.NFPROTO_IPV4,
-			RegAddrMin:  0x1,
-			RegProtoMin: 0x9,
+			RegAddrMin:  regBase,
+			RegProtoMin: regProto,
 		},
 
 		&expr.Verdict{
