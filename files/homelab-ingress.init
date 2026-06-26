@@ -10,6 +10,7 @@ GENERATED_CONFIG="/var/etc/${NAME}/config.yaml"
 
 BASE_INTERFACE=
 GRPC_LISTEN=
+WS_LISTEN=
 AUTH_ISSUER=
 AUTH_AUDIENCE=
 AUTH_ALLOWED_SUBJECTS=
@@ -32,7 +33,8 @@ generate_config() {
 		echo "base_interface: ${BASE_INTERFACE}"
 		echo "grpc:"
 		echo "  listen: ${GRPC_LISTEN}"
-
+		echo "ws:"
+		echo "  listen: ${WS_LISTEN}"
 		if [ -n "${AUTH_ISSUER}" ] && [ -n "${AUTH_ALLOWED_SUBJECTS}" ]; then
 			echo "auth:"
 			echo "  issuer: ${AUTH_ISSUER}"
@@ -61,6 +63,7 @@ start_service() {
 
 	config_get BASE_INTERFACE config base_interface
 	config_get GRPC_LISTEN config grpc_listen "0.0.0.0:50051"
+	config_get WS_LISTEN config ws_listen "0.0.0.0:50052"
 	config_get AUTH_ISSUER config auth_issuer ""
 	config_get AUTH_AUDIENCE config auth_audience ""
 	config_get AUTH_TRUSTED_ROOT_CA config auth_trusted_root_ca ""

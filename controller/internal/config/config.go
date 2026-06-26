@@ -6,13 +6,15 @@ import (
 )
 
 const (
-	DefaultRouterAddr   = "localhost:50051"
-	DefaultPollInterval = 30 * time.Second
-	DefaultMetricsAddr  = ":8080"
+	DefaultRouterAddr     = "localhost:50051"
+	DefaultWSEventAddr    = "" // disabled by default
+	DefaultPollInterval   = 30 * time.Second
+	DefaultMetricsAddr    = ":8080"
 )
 
 type Config struct {
 	RouterAddr   string
+	WSEventAddr  string
 	PollInterval time.Duration
 	MetricsAddr  string
 	// TokenPath is the path to a file containing a Bearer token used to

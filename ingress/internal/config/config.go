@@ -9,16 +9,22 @@ import (
 
 const (
 	DefaultGRPCListen = "0.0.0.0:50051"
+	DefaultWSListen   = "0.0.0.0:50052"
 )
 
 type Config struct {
 	BaseInterface string           `yaml:"base_interface"`
 	GRPC          GRPC             `yaml:"grpc"`
+	WS            WS               `yaml:"ws"`
 	Auth          Auth             `yaml:"auth"`
 	Masquerade    []MasqueradeRule `yaml:"masquerade"`
 }
 
 type GRPC struct {
+	Listen string `yaml:"listen"`
+}
+
+type WS struct {
 	Listen string `yaml:"listen"`
 }
 
@@ -44,6 +50,9 @@ func DefaultConfig() Config {
 	return Config{
 		GRPC: GRPC{
 			Listen: DefaultGRPCListen,
+		},
+		WS: WS{
+			Listen: DefaultWSListen,
 		},
 	}
 }
@@ -73,6 +82,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.GRPC.Listen == "" {
 		cfg.GRPC.Listen = DefaultGRPCListen
 	}
+	if cfg.WS.Listen == "" {
+		cfg.WS.Listen = DefaultWSListen
+	}
 }
 
 func validate(cfg *Config) error {
@@ -84,6 +96,9 @@ func validate(cfg *Config) error {
 	}
 	if len(cfg.Auth.AllowedSubjects) == 0 {
 		return errors.New("auth.allowed_subjects is required")
+	}
+	if cfg.Auth.Audience == "" {
+		return errors.New("auth.audience is required")
 	}
 	return nil
 }

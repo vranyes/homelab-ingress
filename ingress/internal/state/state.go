@@ -129,6 +129,18 @@ func (s *State) Subscribe() chan LBNotification {
 	return ch
 }
 
+func (s *State) Unsubscribe(ch chan LBNotification) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, sub := range s.subscribers {
+		if sub == ch {
+			s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
+			close(ch)
+			return
+		}
+	}
+}
+
 func (s *State) notify(notification LBNotification) {
 	s.mu.RLock()
 	subs := s.subscribers

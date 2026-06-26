@@ -27,12 +27,14 @@ func init() {
 
 func main() {
 	var routerAddr string
+	var wsEventAddr string
 	var pollInterval time.Duration
 	var metricsAddr string
 	var tokenPath string
 	var caPath string
 
 	flag.StringVar(&routerAddr, "router-addr", config.DefaultRouterAddr, "Router service gRPC address")
+	flag.StringVar(&wsEventAddr, "ws-event-addr", config.DefaultWSEventAddr, "WebSocket event address (e.g. localhost:50052)")
 	flag.DurationVar(&pollInterval, "poll-interval", config.DefaultPollInterval, "Interval for polling IP changes")
 	flag.StringVar(&metricsAddr, "metrics-addr", config.DefaultMetricsAddr, "Metrics bind address")
 	flag.StringVar(&tokenPath, "token-path", "", "Path to a Bearer token file for router service authentication")
@@ -41,6 +43,7 @@ func main() {
 
 	cfg := config.Config{
 		RouterAddr:   routerAddr,
+		WSEventAddr:  wsEventAddr,
 		PollInterval: pollInterval,
 		MetricsAddr:  metricsAddr,
 		TokenPath:    tokenPath,
@@ -97,6 +100,15 @@ func main() {
 	if err := mgr.Add(poller); err != nil {
 		setupLog.Error(err, "unable to add IP poller")
 		os.Exit(1)
+	}
+
+	if cfg.WSEventAddr != "" {
+		wsClient := router.NewWSEventClient(mgr.GetClient(), cfg.WSEventAddr, cfg.TokenPath, cfg.CAPath)
+		if err := mgr.Add(wsClient); err != nil {
+			setupLog.Error(err, "unable to add WebSocket event client")
+			os.Exit(1)
+		}
+		setupLog.Info("WebSocket event client enabled", "addr", cfg.WSEventAddr)
 	}
 
 	setupLog.Info("starting manager", "router-addr", cfg.RouterAddr, "poll-interval", cfg.PollInterval)

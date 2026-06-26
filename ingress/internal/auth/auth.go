@@ -35,13 +35,17 @@ func SubjectFromContext(ctx context.Context) (string, bool) {
 	return s, ok
 }
 
-// NewInterceptors creates unary and stream gRPC interceptors that validate
-// incoming requests carry a Bearer token signed by the given OIDC issuer and
-// that the `sub` claim is present in the allowedSubjects list.
-// When audience is non-empty, the token's aud claim must contain it.
-// trustedRoot is an optional cert pool to use when connecting to the OIDC
-// issuer; if nil, the system pool is used.
-func NewInterceptors(ctx context.Context, issuer, audience string, allowedSubjects []string, trustedRoot *x509.CertPool, logger *slog.Logger) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor, error) {
+// TokenVerifier validates Bearer tokens against an OIDC issuer and allowed
+// subjects list. It can be used by both gRPC interceptors and WebSocket handlers.
+type TokenVerifier struct {
+	verifier *oidc.IDTokenVerifier
+	allowed  map[string]struct{}
+	logger   *slog.Logger
+}
+
+// NewTokenVerifier creates a TokenVerifier from OIDC issuer configuration.
+// trustedRoot is an optional cert pool for the OIDC issuer connection.
+func NewTokenVerifier(ctx context.Context, issuer, audience string, allowedSubjects []string, trustedRoot *x509.CertPool, logger *slog.Logger) (*TokenVerifier, error) {
 	if trustedRoot != nil {
 		hc := &http.Client{
 			Timeout: 10 * time.Second,
@@ -54,7 +58,7 @@ func NewInterceptors(ctx context.Context, issuer, audience string, allowedSubjec
 
 	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	verifierCfg := &oidc.Config{}
@@ -63,61 +67,106 @@ func NewInterceptors(ctx context.Context, issuer, audience string, allowedSubjec
 	} else {
 		verifierCfg.SkipClientIDCheck = true
 	}
-	verifier := provider.Verifier(verifierCfg)
 
 	allowed := make(map[string]struct{}, len(allowedSubjects))
 	for _, s := range allowedSubjects {
 		allowed[s] = struct{}{}
 	}
 
+	return &TokenVerifier{
+		verifier: provider.Verifier(verifierCfg),
+		allowed:  allowed,
+		logger:   logger,
+	}, nil
+}
+
+// Verify validates a raw Bearer token and returns the subject on success.
+func (v *TokenVerifier) Verify(ctx context.Context, rawToken string) (string, error) {
+	vctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	idTok, err := v.verifier.Verify(vctx, rawToken)
+	if err != nil {
+		v.logger.Debug("token verify failed", "error", err)
+		return "", status.Error(codes.Unauthenticated, "invalid token")
+	}
+
+	var claims struct {
+		Subject string `json:"sub"`
+	}
+	if err := idTok.Claims(&claims); err != nil {
+		v.logger.Debug("reading token claims failed", "error", err)
+		return "", status.Error(codes.Unauthenticated, "invalid token claims")
+	}
+
+	if _, ok := v.allowed[claims.Subject]; !ok {
+		v.logger.Info("unauthorized subject", "sub", claims.Subject)
+		return "", status.Error(codes.PermissionDenied, "subject not authorized")
+	}
+
+	return claims.Subject, nil
+}
+
+// ExtractBearerToken extracts a Bearer token from gRPC metadata.
+func ExtractBearerToken(ctx context.Context) (string, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", status.Error(codes.Unauthenticated, "missing metadata")
+	}
+
+	vals := md.Get("authorization")
+	if len(vals) == 0 {
+		vals = md.Get("Authorization")
+	}
+	if len(vals) == 0 {
+		return "", status.Error(codes.Unauthenticated, "authorization header missing")
+	}
+
+	for _, v := range vals {
+		if strings.HasPrefix(strings.ToLower(v), "bearer ") {
+			return v[len("Bearer "):], nil
+		}
+	}
+	return "", status.Error(codes.Unauthenticated, "bearer token missing")
+}
+
+// ExtractBearerTokenHTTP extracts a Bearer token from an HTTP Authorization header.
+func ExtractBearerTokenHTTP(r *http.Request) (string, error) {
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		auth = r.Header.Get("authorization")
+	}
+	if auth == "" {
+		return "", status.Error(codes.Unauthenticated, "authorization header missing")
+	}
+	if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return "", status.Error(codes.Unauthenticated, "bearer token missing")
+	}
+	return auth[len("Bearer "):], nil
+}
+
+// NewInterceptors creates unary and stream gRPC interceptors that validate
+// incoming requests carry a Bearer token signed by the given OIDC issuer and
+// that the `sub` claim is present in the allowedSubjects list.
+// When audience is non-empty, the token's aud claim must contain it.
+// trustedRoot is an optional cert pool to use when connecting to the OIDC
+// issuer; if nil, the system pool is used.
+func NewInterceptors(ctx context.Context, issuer, audience string, allowedSubjects []string, trustedRoot *x509.CertPool, logger *slog.Logger) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor, error) {
+	verifier, err := NewTokenVerifier(ctx, issuer, audience, allowedSubjects, trustedRoot, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	verifyAndInject := func(ctx context.Context) (context.Context, error) {
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			return nil, status.Error(codes.Unauthenticated, "missing metadata")
-		}
-
-		vals := md.Get("authorization")
-		if len(vals) == 0 {
-			vals = md.Get("Authorization")
-		}
-		if len(vals) == 0 {
-			return nil, status.Error(codes.Unauthenticated, "authorization header missing")
-		}
-
-		var raw string
-		for _, v := range vals {
-			if strings.HasPrefix(strings.ToLower(v), "bearer ") {
-				raw = v[len("Bearer "):]
-				break
-			}
-		}
-		if raw == "" {
-			return nil, status.Error(codes.Unauthenticated, "bearer token missing")
-		}
-
-		// Verify token with a short timeout
-		vctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		idTok, err := verifier.Verify(vctx, raw)
+		raw, err := ExtractBearerToken(ctx)
 		if err != nil {
-			logger.Debug("token verify failed", "error", err)
-			return nil, status.Error(codes.Unauthenticated, "invalid token")
+			return nil, err
 		}
-
-		var claims struct {
-			Subject string `json:"sub"`
+		subject, err := verifier.Verify(ctx, raw)
+		if err != nil {
+			return nil, err
 		}
-		if err := idTok.Claims(&claims); err != nil {
-			logger.Debug("reading token claims failed", "error", err)
-			return nil, status.Error(codes.Unauthenticated, "invalid token claims")
-		}
-
-		if _, ok := allowed[claims.Subject]; !ok {
-			logger.Info("unauthorized subject", "sub", claims.Subject)
-			return nil, status.Error(codes.PermissionDenied, "subject not authorized")
-		}
-
-		return context.WithValue(ctx, subjectContextKey{}, claims.Subject), nil
+		return context.WithValue(ctx, subjectContextKey{}, subject), nil
 	}
 
 	unary := func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {

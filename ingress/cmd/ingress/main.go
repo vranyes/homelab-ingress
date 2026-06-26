@@ -28,6 +28,7 @@ import (
 	"github.com/vranyes/homelab-ingress/ingress/internal/router/nftables"
 	"github.com/vranyes/homelab-ingress/ingress/internal/service"
 	"github.com/vranyes/homelab-ingress/ingress/internal/state"
+	"github.com/vranyes/homelab-ingress/ingress/internal/ws"
 	routerv1 "github.com/vranyes/homelab-ingress/ingress/pkg/api/router/v1"
 )
 
@@ -108,6 +109,12 @@ func main() {
 		}
 	}
 
+	verifier, err := auth.NewTokenVerifier(context.Background(), cfg.Auth.Issuer, cfg.Auth.Audience, cfg.Auth.AllowedSubjects, trustedRoot, logger)
+	if err != nil {
+		logger.Error("failed to create token verifier", "error", err)
+		os.Exit(1)
+	}
+
 	unary, stream, err := auth.NewInterceptors(context.Background(), cfg.Auth.Issuer, cfg.Auth.Audience, cfg.Auth.AllowedSubjects, trustedRoot, logger)
 	if err != nil {
 		logger.Error("failed to initialize auth", "error", err)
@@ -130,6 +137,15 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	if cfg.WS.Listen != "" {
+		wsSrv := ws.NewServer(cfg.WS.Listen, verifier, st, tlsCfg, logger)
+		go func() {
+			if err := wsSrv.Start(); err != nil {
+				logger.Error("WebSocket server error", "error", err)
+			}
+		}()
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
