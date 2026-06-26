@@ -9,7 +9,6 @@ builds:
   - arm64
   - amd64
   goos:
-  - darwin
   - linux
   id: controller
   ldflags:
@@ -24,13 +23,12 @@ builds:
   - arm64
   - amd64
   goos:
-  - darwin
   - linux
   id: ingress
   ldflags:
   - '-s -w'
   main: ./ingress/cmd/ingress
-- binary: ingress-cli
+- binary: hictl
   env:
   - CGO_ENABLED=0
   flags:
@@ -41,10 +39,10 @@ builds:
   goos:
   - darwin
   - linux
-  id: ingress-cli
+  id: hictl
   ldflags:
   - '-s -w'
-  main: ./ingress/cmd/cli
+  main: ./ingress/cmd/hictl
 kos:
 - build: controller
   id: controller
@@ -70,7 +68,7 @@ nfpms:
   ids:
   - ingress
   maintainer: Josiah Vranyes
-  package_name: homelab-loadbalancer-ingress
+  package_name: homelab-ingress
   recommends: []
   suggests: []
   conflicts: []
@@ -79,5 +77,5 @@ nfpms:
   - procd
   - uci
 
-project_name: homelab-loadbalancer
+project_name: homelab-ingress
 version: 2
