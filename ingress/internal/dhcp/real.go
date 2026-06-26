@@ -23,6 +23,7 @@ type realClient struct {
 	mask     net.IPMask
 	lease    *nclient4.Lease
 	acquired bool
+	restored bool // lease was restored from persistence
 	cancel   context.CancelFunc
 	done     chan struct{}
 	started  bool
@@ -30,14 +31,25 @@ type realClient struct {
 	logger   *slog.Logger
 }
 
-func newRealClient(iface string, mac net.HardwareAddr, onChange IPChangeFunc, logger *slog.Logger) *realClient {
-	return &realClient{
+func newRealClient(iface string, mac net.HardwareAddr, leaseInfo *LeaseInfo, onChange IPChangeFunc, logger *slog.Logger) *realClient {
+	c := &realClient{
 		iface:    iface,
 		mac:      mac,
 		onChange: onChange,
 		done:     make(chan struct{}),
 		logger:   logger,
 	}
+	if leaseInfo != nil {
+		lease := leaseFromInfo(leaseInfo)
+		if lease != nil {
+			c.lease = lease
+			c.ip = leaseInfo.Address
+			c.mask = leaseInfo.Mask
+			c.restored = true
+			logger.Info("restored DHCP lease from persistence", "interface", iface, "ip", c.ip)
+		}
+	}
+	return c
 }
 
 func (c *realClient) Start() error {
@@ -92,8 +104,30 @@ func (c *realClient) IsAcquired() bool {
 	return c.acquired
 }
 
+func (c *realClient) LeaseInfo() *LeaseInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.lease == nil || c.ip == nil {
+		return nil
+	}
+	return newLeaseInfo(c.lease, c.ip, c.mask)
+}
+
 func (c *realClient) run(ctx context.Context) {
 	defer close(c.done)
+
+	if c.lease != nil && c.restored {
+		c.tryRenewExisting(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+	}
+	if c.acquired {
+		c.renewalLoop(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+	}
 
 	for {
 		ip, mask, err := c.dhcpRequest(ctx)
@@ -113,44 +147,84 @@ func (c *realClient) run(ctx context.Context) {
 		c.ip = ip
 		c.mask = mask
 		c.acquired = true
+		c.restored = false
 		c.mu.Unlock()
 
 		if changed && c.onChange != nil {
 			c.logger.Info("IP changed, calling onChange callback", "interface", c.iface, "new_ip", ip)
+		}
+		if c.onChange != nil {
 			c.onChange(c.iface, ip, mask)
 		}
 
 		c.logger.Info("DHCP lease acquired", "interface", c.iface, "ip", ip)
 
-		for {
-			renewalInterval := c.renewalInterval()
-			c.logger.Debug("scheduling DHCP renewal", "interface", c.iface, "in", renewalInterval)
+		c.renewalLoop(ctx)
+		if ctx.Err() != nil {
+			return
+		}
 
-			renewalTimer := time.NewTimer(renewalInterval)
-			select {
-			case <-ctx.Done():
-				renewalTimer.Stop()
-				c.logger.Info("DHCP client context cancelled", "interface", c.iface)
-				return
-			case <-renewalTimer.C:
-			}
+		c.logger.Warn("lease renewal failed, restarting DHCP discovery", "interface", c.iface)
+	}
+}
 
-			newIP, newMask, err := c.dhcpRenew(ctx)
-			if err != nil {
-				c.logger.Warn("DHCP renewal failed, will re-discover", "interface", c.iface, "error", err)
-				break
-			}
+func (c *realClient) tryRenewExisting(ctx context.Context) {
+	c.logger.Info("attempting to renew existing lease", "interface", c.iface)
+	newIP, newMask, err := c.dhcpRenew(ctx)
+	if err != nil {
+		c.logger.Warn("initial lease renewal failed, falling back to discover", "interface", c.iface, "error", err)
+		c.mu.Lock()
+		c.lease = nil
+		c.ip = nil
+		c.mask = nil
+		c.acquired = false
+		c.restored = false
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Lock()
+	c.ip = newIP
+	c.mask = newMask
+	c.acquired = true
+	c.restored = false
+	c.mu.Unlock()
+	c.logger.Info("DHCP lease renewed from persistence", "interface", c.iface, "ip", newIP)
+	if c.onChange != nil {
+		c.onChange(c.iface, newIP, newMask)
+	}
+}
 
-			c.mu.Lock()
-			renewalChanged := c.ip == nil || !c.ip.Equal(newIP)
-			c.ip = newIP
-			c.mask = newMask
-			c.mu.Unlock()
+func (c *realClient) renewalLoop(ctx context.Context) {
+	for {
+		renewalInterval := c.renewalInterval()
+		c.logger.Debug("scheduling DHCP renewal", "interface", c.iface, "in", renewalInterval)
 
-			if renewalChanged && c.onChange != nil {
-				c.logger.Info("IP changed after renewal", "interface", c.iface, "new_ip", newIP)
-				c.onChange(c.iface, newIP, newMask)
-			}
+		renewalTimer := time.NewTimer(renewalInterval)
+		select {
+		case <-ctx.Done():
+			renewalTimer.Stop()
+			c.logger.Info("DHCP client context cancelled", "interface", c.iface)
+			return
+		case <-renewalTimer.C:
+		}
+
+		newIP, newMask, err := c.dhcpRenew(ctx)
+		if err != nil {
+			c.logger.Warn("DHCP renewal failed, will re-discover", "interface", c.iface, "error", err)
+			return
+		}
+
+		c.mu.Lock()
+		renewalChanged := c.ip == nil || !c.ip.Equal(newIP)
+		c.ip = newIP
+		c.mask = newMask
+		c.mu.Unlock()
+
+		if renewalChanged && c.onChange != nil {
+			c.logger.Info("IP changed after renewal", "interface", c.iface, "new_ip", newIP)
+		}
+		if c.onChange != nil {
+			c.onChange(c.iface, newIP, newMask)
 		}
 	}
 }

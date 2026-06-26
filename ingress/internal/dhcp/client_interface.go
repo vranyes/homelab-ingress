@@ -3,6 +3,7 @@
 package dhcp
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net"
 	"sync"
@@ -20,12 +21,14 @@ type Client interface {
 	Stop()
 	CurrentIP() net.IP
 	IsAcquired() bool
+	LeaseInfo() *LeaseInfo
 }
 
 type Manager struct {
 	mu             sync.RWMutex
 	clients        map[string]Client
 	ifaceToService map[string]string
+	leases         map[string]*LeaseInfo
 	st             *state.State
 	logger         *slog.Logger
 	done           chan struct{}
@@ -33,21 +36,48 @@ type Manager struct {
 }
 
 func NewManager(st *state.State, logger *slog.Logger) *Manager {
-	return &Manager{
+	m := &Manager{
 		clients:        make(map[string]Client),
 		ifaceToService: make(map[string]string),
+		leases:         make(map[string]*LeaseInfo),
 		st:             st,
 		logger:         logger,
 		done:           make(chan struct{}),
 	}
+	m.loadLeases()
+	return m
 }
 
-func (m *Manager) ensureAndStart(iface string, mac net.HardwareAddr) {
+func (m *Manager) loadLeases() {
+	raw, err := m.st.LoadLeases()
+	if err != nil {
+		m.logger.Error("failed to load persisted DHCP leases", "error", err)
+		return
+	}
+	for key, data := range raw {
+		var info LeaseInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			m.logger.Error("failed to unmarshal persisted lease, skipping", "service", key, "error", err)
+			continue
+		}
+		m.leases[key] = &info
+		m.logger.Info("loaded persisted DHCP lease", "service", key, "ip", info.Address)
+	}
+}
+
+func (m *Manager) ensureAndStart(iface string, mac net.HardwareAddr, serviceKey string) {
 	m.mu.Lock()
 	client, exists := m.clients[iface]
 	if !exists {
-		m.logger.Info("creating new DHCP client", "interface", iface, "mac", mac.String())
-		client = newRealClient(iface, mac, m.onIPChange, m.logger)
+		m.logger.Info("creating new DHCP client", "interface", iface, "mac", mac.String(), "service", serviceKey)
+
+		var leaseInfo *LeaseInfo
+		if li, ok := m.leases[serviceKey]; ok {
+			leaseInfo = li
+			delete(m.leases, serviceKey)
+		}
+
+		client = newRealClient(iface, mac, leaseInfo, m.onIPChange, m.logger)
 		m.clients[iface] = client
 	}
 	m.mu.Unlock()
@@ -72,12 +102,56 @@ func (m *Manager) onIPChange(iface string, ip net.IP, mask net.IPMask) {
 		return
 	}
 
-	clone := svc.Clone()
-	clone.SourceAddress = ip
-	clone.SourceMask = mask
-	acquired := true
-	clone.DHCPAcquired = &acquired
-	m.st.UpdateService(clone)
+	ipChanged := !svc.SourceAddress.Equal(ip)
+	maskChanged := maskEqual(svc.SourceMask, mask)
+
+	if ipChanged || maskChanged {
+		clone := svc.Clone()
+		clone.SourceAddress = ip
+		clone.SourceMask = mask
+		acquired := true
+		clone.DHCPAcquired = &acquired
+		m.st.UpdateService(clone)
+	}
+
+	m.persistLease(iface, key)
+}
+
+func maskEqual(a, b net.IPMask) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Manager) persistLease(iface, serviceKey string) {
+	m.mu.RLock()
+	client, ok := m.clients[iface]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	leaseInfo := client.LeaseInfo()
+	if leaseInfo == nil {
+		return
+	}
+	leaseInfo.ServiceName = serviceKey
+
+	data, err := json.Marshal(leaseInfo)
+	if err != nil {
+		m.logger.Error("failed to marshal lease info", "interface", iface, "error", err)
+		return
+	}
+
+	if err := m.st.SaveLease(serviceKey, data); err != nil {
+		m.logger.Error("failed to persist DHCP lease", "interface", iface, "service", serviceKey, "error", err)
+	}
 }
 
 func (m *Manager) serviceKeyForInterface(iface string) string {
@@ -195,7 +269,7 @@ func (m *Manager) handleUpsert(ifname string, svc state.LBService) {
 	}
 
 	m.setServiceMapping(svc.ServiceName, ifname)
-	m.ensureAndStart(ifname, svc.MACAddr)
+	m.ensureAndStart(ifname, svc.MACAddr, svc.ServiceName)
 }
 
 func (m *Manager) serviceKeyToIface(serviceKey string) string {
@@ -210,6 +284,10 @@ func (m *Manager) serviceKeyToIface(serviceKey string) string {
 }
 
 func (m *Manager) handleDelete(ifname string, serviceKey string) {
+	if err := m.st.DeleteLease(serviceKey); err != nil {
+		m.logger.Error("failed to delete persisted DHCP lease", "service", serviceKey, "error", err)
+	}
+
 	if ifname == "" {
 		ifname = m.deleteServiceMapping(serviceKey)
 	} else {
@@ -256,13 +334,21 @@ func (m *Manager) reconcile() {
 		if !activeIfaces[iface] {
 			m.logger.Info("reconcile: creating missing DHCP client", "interface", iface)
 			m.setServiceMapping(d.serviceKey, d.iface)
-			m.ensureAndStart(d.iface, d.mac)
+			m.ensureAndStart(d.iface, d.mac, d.serviceKey)
 		}
 	}
 
 	for iface := range activeIfaces {
 		if _, wanted := desired[iface]; !wanted {
 			m.logger.Info("reconcile: removing stale DHCP client", "interface", iface)
+
+			staleKey := m.serviceKeyForInterface(iface)
+			if staleKey != "" {
+				if err := m.st.DeleteLease(staleKey); err != nil {
+					m.logger.Error("failed to delete persisted lease for stale client", "service", staleKey, "interface", iface, "error", err)
+				}
+			}
+
 			m.remove(iface)
 		}
 	}

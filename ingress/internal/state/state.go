@@ -228,6 +228,27 @@ func (s *State) Clone() *State {
 	return cpy
 }
 
+func (s *State) LoadLeases() (map[string][]byte, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	return s.store.LoadLeases()
+}
+
+func (s *State) SaveLease(serviceName string, data []byte) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.SaveLease(serviceName, data)
+}
+
+func (s *State) DeleteLease(serviceName string) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.DeleteLease(serviceName)
+}
+
 func (s *State) Close() error {
 	if s.store != nil {
 		return s.store.Close()

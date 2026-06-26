@@ -28,7 +28,16 @@ func NewStore(dbPath string, logger *slog.Logger) (*Store, error) {
 			data TEXT NOT NULL
 		);
 	`); err != nil {
-		return nil, fmt.Errorf("create table: %w", err)
+		return nil, fmt.Errorf("create services table: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS dhcp_leases (
+			service_name TEXT PRIMARY KEY,
+			data BLOB NOT NULL
+		);
+	`); err != nil {
+		return nil, fmt.Errorf("create dhcp_leases table: %w", err)
 	}
 
 	return &Store{db: db, logger: logger}, nil
@@ -87,6 +96,62 @@ func (s *Store) SaveService(svc *LBService) error {
 	`, svc.ServiceName, string(data))
 	if err != nil {
 		return fmt.Errorf("upsert service: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) LoadLeases() (map[string][]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.db.Query("SELECT service_name, data FROM dhcp_leases")
+	if err != nil {
+		return nil, fmt.Errorf("query leases: %w", err)
+	}
+	defer rows.Close()
+
+	leases := make(map[string][]byte)
+	for rows.Next() {
+		var name string
+		var data []byte
+		if err := rows.Scan(&name, &data); err != nil {
+			s.logger.Error("failed to scan lease row, skipping", "error", err)
+			continue
+		}
+		leases[name] = data
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate lease rows: %w", err)
+	}
+
+	return leases, nil
+}
+
+func (s *Store) SaveLease(serviceName string, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		INSERT INTO dhcp_leases (service_name, data)
+		VALUES (?, ?)
+		ON CONFLICT(service_name) DO UPDATE SET data = excluded.data;
+	`, serviceName, data)
+	if err != nil {
+		return fmt.Errorf("upsert lease: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) DeleteLease(serviceName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM dhcp_leases WHERE service_name = ?", serviceName)
+	if err != nil {
+		return fmt.Errorf("delete lease: %w", err)
 	}
 
 	return nil
