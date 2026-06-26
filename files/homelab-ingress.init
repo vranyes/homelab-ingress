@@ -13,6 +13,7 @@ GRPC_LISTEN=
 AUTH_ISSUER=
 AUTH_AUDIENCE=
 AUTH_ALLOWED_SUBJECTS=
+AUTH_TRUSTED_ROOT_CA=
 
 append_subject() {
 	AUTH_ALLOWED_SUBJECTS="${AUTH_ALLOWED_SUBJECTS} ${1}"
@@ -31,6 +32,7 @@ generate_config() {
 			echo "auth:"
 			echo "  issuer: ${AUTH_ISSUER}"
 			echo "  audience: ${AUTH_AUDIENCE}"
+			[ -n "${AUTH_TRUSTED_ROOT_CA}" ] && echo "  trusted_root_ca: ${AUTH_TRUSTED_ROOT_CA}"
 			echo "  allowed_subjects:"
 			for subj in ${AUTH_ALLOWED_SUBJECTS}; do
 				echo "    - ${subj}"
@@ -46,6 +48,7 @@ start_service() {
 	config_get GRPC_LISTEN config grpc_listen "0.0.0.0:50051"
 	config_get AUTH_ISSUER config auth_issuer ""
 	config_get AUTH_AUDIENCE config auth_audience ""
+	config_get AUTH_TRUSTED_ROOT_CA config auth_trusted_root_ca ""
 
 	AUTH_ALLOWED_SUBJECTS=
 	config_list_foreach config auth_allowed_subjects append_subject

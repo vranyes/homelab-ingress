@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: homelab-ingress-controller
-  namespace: homelab-ingress
+  namespace: default
   labels:
     app: homelab-ingress-controller
 spec:
@@ -19,7 +19,7 @@ spec:
       serviceAccountName: homelab-ingress-controller
       containers:
       - name: controller
-        image: ghcr.io/vranyes/homelab-ingress/controller@sha256:559ae6603750261569a0db9b0ee0d48519eb122a5dc347f85316146511e75937
+        image: ghcr.io/vranyes/homelab-ingress/controller@sha256:adf90e8cb7596711d95d8234911fb43c0c20ad3a3b61b20669f87ec92000160a
         args:
         - --router-addr=$(ROUTER_ADDR)
         - --poll-interval=$(POLL_INTERVAL)
@@ -72,7 +72,7 @@ spec:
           - serviceAccountToken:
               path: token
               expirationSeconds: 3600
-              audience: homelab-ingress-ingress
+              audience: homelab-ingress
       - name: router-ca
         configMap:
           name: homelab-ingress-ca
