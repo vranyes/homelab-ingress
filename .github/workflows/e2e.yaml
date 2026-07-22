@@ -1,0 +1,53 @@
+name: e2e
+
+on:
+  pull_request:
+    paths:
+      - 'ingress/**'
+      - 'controller/**'
+      - 'proto/**'
+      - 'e2e/**'
+      - 'e2e-vm/**'
+      - 'Makefile'
+      - '.github/workflows/e2e.yaml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Install lima
+        run: |
+          curl -fsSL https://github.com/lima-vm/lima/releases/download/v0.23.2/lima-0.23.2-Linux-x86_64.tar.gz \
+            | sudo tar xz -C /usr/local --strip-components=1
+          limactl --version
+      - name: Enable nested KVM (faster lima boot)
+        run: |
+          sudo chmod 666 /dev/kvm || true
+          ls -la /dev/kvm || true
+      - name: Cache lima VM image
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/lima
+          key: lima-hl-ingress-${{ hashFiles('e2e-vm/**') }}
+      - name: Run e2e suite
+        run: make test-e2e
+      - name: Collect logs on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hl-ingress-vm-logs
+          path: ~/.cache/lima/*/log/*.log
+          if-no-files-found: ignore

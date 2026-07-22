@@ -1,0 +1,267 @@
+---
+# Lima VM used as the host for the homelab-ingress end-to-end test suite.
+#
+# Usage:
+#   limactl start --name=hl-ingress-e2e ./lima.yaml
+#   limactl copy . hl-ingress-e2e:/root/homelab-ingress/
+#   limactl exec hl-ingress-e2e -- <build + test command>
+#
+# Compatibility: Lima >= 2.0 (tested with 2.1.4 on macOS arm64).
+minimumLimaVersion: 2.0.0
+
+vmType: qemu
+arch: x86_64
+
+cpus: 4
+memory: 4GiB
+disk: 30GiB
+
+images:
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/cloud/nocloud_alpine-3.22.4-x86_64-uefi-cloudinit-r0.qcow2"
+  arch: "x86_64"
+  digest: "sha512:1b8743fccfd92d8b690e5a75972bebe5d6826b2ea94bc7c71ede3a2a39a5535cbb4e49a6a3f42852d1e05d63076c6f1fbc29ddb\
+    b63d766101eaa9dadcaebbb1f"
+
+# We do not need containerd at all: k3s ships its own embedded containerd.
+containerd:
+  system: false
+  user: false
+
+# SSH is required for `limactl shell/copy` to work; keep defaults minimal.
+ssh:
+  localPort: 0
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+
+# No bind mounts: the test harness copies binaries/config in via `limactl copy`
+# so reprovisioning the VM does not pick up stale host-side binaries.
+mounts: []
+
+# Networking layout:
+#   - eth0:   the default (SLIRP/NAT) interface from Lima 2.x. k3s flannel runs
+#             over this and pod IP / Service IP traffic is NATted to the host
+#             via Lima's port-forwarding.
+#   - br0 :  a host-only bridge created INSIDE the VM by the provision
+#            script (see step 3 below). br0 is purely intra-VM — neither pod
+#            traffic nor controller-to-ingress traffic crosses this bridge
+#            because both run inside the VM natively. The ingress daemon's
+#            macvlan children live on br0 and receive DHCP leases from
+#            dnsmasq, also bound to br0. The Ginkgo test reaches the LB IP
+#            over br0 directly.
+#
+# No lima-side `networks:` entry is needed: br0 does not cross the host/
+# guest boundary, so we don't need socket_vmnet or guest-to-host bridging.
+networks: []
+
+# Single inline provisioning script. `mode: system` runs each item as a
+# separate root shell; this is the bootstrap. The script installs packages,
+# k3s, sets up the br0 bridge idempotently, configures dnsmasq, and registers
+# three openrc services (oidc, ingress, controller) WITHOUT starting them —
+# the harness starts them in dependency order after writing config + token.
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eu
+
+    echo "==> hl-ingress e2e VM: starting cloud-init-equivalent bootstrap"
+
+    ########################################################################
+    # 1. Packages
+    ########################################################################
+    apk update
+    apk add --no-cache \
+        nftables \
+        iproute2 \
+        dnsmasq \
+        iptables \
+        openrc \
+        curl \
+        ca-certificates \
+        wget \
+        tar \
+        bash \
+        sudo \
+        parted \
+        util-linux
+
+    ########################################################################
+    # 1b. Go 1.26.5 (official tarball, not Alpine's outdated repo)
+    ########################################################################
+    if [ ! -x /usr/local/go/bin/go ] || [ "$(/usr/local/go/bin/go version | awk '{print $3}')" != "go1.26.5" ]; then
+        echo "==> installing go 1.26.5"
+        curl -fsSL https://go.dev/dl/go1.26.5.linux-amd64.tar.gz -o /tmp/go.tar.gz
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf /tmp/go.tar.gz
+        rm /tmp/go.tar.gz
+    fi
+    mkdir -p /etc/profile.d
+    printf '%s\n' \
+        'export PATH=$PATH:/usr/local/go/bin' \
+        'export GOPATH=$HOME/go' \
+        'export PATH=$PATH:$GOPATH/bin' \
+        > /etc/profile.d/golang.sh
+
+    ########################################################################
+    # 2. k3s (embedded containerd; flannel on eth0; no traefik/servicelb)
+    ########################################################################
+if ! command -v k3s >/dev/null 2>&1; then
+        echo "==> installing k3s"
+        # k3s install script downloads its own k8s binaries; needs Go already present (see step 1b above)
+        curl -sfL https://get.k3s.io | sh -s - \
+            --disable=traefik \
+            --disable=servicelb \
+            --flannel-iface=eth0
+    else
+        echo "==> k3s already installed: $(k3s --version | head -n1)"
+        # Ensure it uses eth0 even on reboot
+        mkdir -p /etc/rancher/k3s
+        grep -q 'flannel-iface' /etc/rancher/k3s/k3s.yaml || \
+            sed -i 's|--flannel-iface=lima0|--flannel-iface=eth0|g' /etc/rancher/k3s/k3s.yaml 2>/dev/null || true
+    fi
+
+    ########################################################################
+    # 3. hl-br0 host-only bridge (10.44.0.1/24). Dedicated bridge for the
+    #    homelab data plane: dnsmasq leases, macvlan children, nftables.
+    ########################################################################
+    ip addr flush dev hl-br0 2>/dev/null || true
+    ip link set hl-br0 up 2>/dev/null || true
+    ip addr add 10.44.0.1/24 dev hl-br0 2>/dev/null || true
+
+    # Disable bridge-netfilter so k3s iptables rules don't filter DHCP
+    # traffic between macvlan children and dnsmasq.
+    echo 0 > /sys/class/net/hl-br0/bridge/nf_call_iptables 2>/dev/null || true
+    echo 0 > /sys/class/net/hl-br0/bridge/nf_call_arptables 2>/dev/null || true
+
+    ########################################################################
+    # 4. dnsmasq on hl-br0
+    ########################################################################
+    mkdir -p /etc/dnsmasq.d
+    cat > /etc/dnsmasq.d/hl-ingress.conf <<'DNSMASQ'
+    interface=hl-br0
+    bind-interfaces
+    dhcp-range=10.44.0.10,10.44.0.100,255.255.255.0,24h
+    DNSMASQ
+    if ! rc-service dnsmasq status >/dev/null 2>&1; then
+        rc-update add dnsmasq default
+    fi
+    rc-service dnsmasq restart || true
+
+    ########################################################################
+    # 5. State and runtime directories
+    ########################################################################
+    mkdir -p \
+        /etc/homelab-ingress \
+        /var/lib/homelab-ingress \
+        /var/run/hl-ingress \
+        /var/log/hl-ingress
+
+    ########################################################################
+    # 6. OpenRC service: hl-ingress-oidc
+    ########################################################################
+    if [ ! -f /etc/init.d/hl-ingress-oidc ]; then
+      tee /etc/init.d/hl-ingress-oidc <<'OIDC' | sed 's/^      //'
+      #!/sbin/openrc-run
+      description="homelab-ingress oidc-mock"
+      command="/usr/local/bin/oidc-mock"
+      pidfile="/run/hl-ingress-oidc.pid"
+      output_log="/var/log/hl-ingress/oidc.log"
+      error_log="/var/log/hl-ingress/oidc.log"
+      command_background=true
+      command_user="root"
+
+      depend() {
+          need net
+      }
+
+      start_pre() {
+          mkdir -p /var/run/hl-ingress /var/log/hl-ingress
+      }
+OIDC
+      chmod +x /etc/init.d/hl-ingress-oidc
+      rc-update add hl-ingress-oidc default
+    fi
+
+    ########################################################################
+    # 7. OpenRC service: hl-ingress-ingress
+    ########################################################################
+    if [ ! -f /etc/init.d/hl-ingress-ingress ]; then
+      tee /etc/init.d/hl-ingress-ingress <<'ING' | sed 's/^      //'
+      #!/sbin/openrc-run
+      description="homelab-ingress ingress daemon"
+      command="/usr/local/bin/ingress"
+      command_args="--config /etc/homelab-ingress/config.yaml --state-dir /var/lib/homelab-ingress"
+      pidfile="/run/hl-ingress-ingress.pid"
+      output_log="/var/log/hl-ingress/ingress.log"
+      error_log="/var/log/hl-ingress/ingress.log"
+      command_background=true
+      command_user="root"
+
+      depend() {
+          need net
+          after dnsmasq
+      }
+
+      start_pre() {
+          mkdir -p /var/run/hl-ingress /var/log/hl-ingress /var/lib/homelab-ingress
+      }
+ING
+      chmod +x /etc/init.d/hl-ingress-ingress
+      rc-update add hl-ingress-ingress default
+    fi
+
+    ########################################################################
+    # 8. OpenRC service: hl-ingress-controller (wraps the controller binary
+    #    with KUBECONFIG exported; OpenRC's supervise-daemon does not honour
+    #    command_user's env).
+    ########################################################################
+    if [ ! -f /usr/local/bin/hl-ingress-controller-wrapper.sh ]; then
+      tee /usr/local/bin/hl-ingress-controller-wrapper.sh <<'WRAPPER' | sed 's/^      //'
+      #!/bin/sh
+      export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+      exec /usr/local/bin/controller \
+          --router-addr 127.0.0.1:50051 \
+          --token-path /var/run/hl-ingress/token \
+          --ca-path /var/lib/homelab-ingress/ca.pem \
+          --metrics-addr :8081 \
+          --poll-interval 5s \
+          "$@"
+WRAPPER
+      chmod +x /usr/local/bin/hl-ingress-controller-wrapper.sh
+    fi
+
+    if [ ! -f /etc/init.d/hl-ingress-controller ]; then
+      tee /etc/init.d/hl-ingress-controller <<'CTL' | sed 's/^      //'
+      #!/sbin/openrc-run
+      description="homelab-ingress kubernetes controller"
+      command="/usr/local/bin/hl-ingress-controller-wrapper.sh"
+      pidfile="/run/hl-ingress-controller.pid"
+      output_log="/var/log/hl-ingress/controller.log"
+      error_log="/var/log/hl-ingress/controller.log"
+      command_background=true
+      command_user="root"
+
+      depend() {
+          need net
+          after k3s
+      }
+
+      start_pre() {
+          mkdir -p /var/run/hl-ingress /var/log/hl-ingress
+      }
+CTL
+      chmod +x /etc/init.d/hl-ingress-controller
+      rc-update add hl-ingress-controller default
+    fi
+
+    ########################################################################
+    # 9. Banner
+    ########################################################################
+    echo ""
+    echo "hl-ingress cloud-init complete"
+    echo "  networks: eth0 (NAT, k3s flannel), hl-br0 (10.44.0.1/24, homelab data plane)"
+    echo "  k3s:      $(command -v k3s)"
+    echo "  go:       $(/usr/local/go/bin/go version 2>/dev/null || echo 'not installed')"
+    echo "  state:    /var/lib/homelab-ingress"
+    echo "  config:   /etc/homelab-ingress/config.yaml"
+    echo "  services: hl-ingress-{oidc,ingress,controller} (enabled, NOT started)"
