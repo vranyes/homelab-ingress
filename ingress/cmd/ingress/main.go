@@ -36,6 +36,7 @@ const configPathDefault = "/etc/homelab-ingress/config.yaml"
 
 func main() {
 	configPath := flag.String("config", configPathDefault, "path to config file")
+	stateDir := flag.String("state-dir", "/etc/homelab-ingress", "path to state directory")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -46,7 +47,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	st, err := loadState(logger, cfg.BaseInterface)
+	st, err := loadState(logger, *stateDir, cfg.BaseInterface)
 	if err != nil {
 		logger.Error("failed to load state", "error", err)
 		os.Exit(1)
@@ -74,16 +75,15 @@ func main() {
 	srv.ActiveMacvlanFunc = linkMgr.ActiveCount
 
 	// Load or create a root CA and generate a leaf TLS certificate for the server.
-	certDir := filepath.Dir(*configPath)
 	serverNames := []string{stripPort(cfg.GRPC.Listen)}
-	tlsCert, caPEM, err := certgen.LoadOrCreate(certDir, serverNames)
+	tlsCert, caPEM, err := certgen.LoadOrCreate(*stateDir, serverNames)
 	if err != nil {
 		logger.Error("failed to load or create TLS certificate", "error", err)
 		os.Exit(1)
 	}
 
 	// Write the CA PEM so clients can pick it up.
-	caOut := filepath.Join(certDir, "ca.pem")
+	caOut := filepath.Join(*stateDir, "ca.pem")
 	if _, err := os.Stat(caOut); os.IsNotExist(err) {
 		if err := os.WriteFile(caOut, caPEM, 0644); err != nil {
 			logger.Error("failed to write CA certificate", "error", err)
@@ -179,12 +179,12 @@ func loadConfig(logger *slog.Logger, path string) (config.Config, error) {
 	return cfg, nil
 }
 
-func loadState(logger *slog.Logger, baseIface string) (*state.State, error) {
+func loadState(logger *slog.Logger, stateDir, baseIface string) (*state.State, error) {
 	if baseIface == "" {
 		return nil, fmt.Errorf("base_interface is required")
 	}
 
-	store, err := state.NewStore("/etc/homelab-ingress/state.db", logger)
+	store, err := state.NewStore(filepath.Join(stateDir, "state.db"), logger)
 	if err != nil {
 		return nil, fmt.Errorf("create store: %w", err)
 	}
