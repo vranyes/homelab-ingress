@@ -99,6 +99,40 @@ func WaitForLogMatch(ctx context.Context, path, pattern string, timeout time.Dur
 	return fmt.Errorf("timeout waiting for log match %q in %s after %s", pattern, path, timeout)
 }
 
+// GrepFileAfter is like GrepFile but only reads bytes beyond `minSize`,
+// returning the first matching line and the offset of the next byte after it.
+func GrepFileAfter(path, pattern string, minSize int64) (string, int64, error) {
+	re, err := compilePattern(pattern)
+	if err != nil {
+		return "", 0, err
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "", 0, err
+	}
+	if fi.Size() <= minSize {
+		return "", minSize, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(minSize, 0); err != nil {
+		return "", 0, err
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	offset := minSize
+	for sc.Scan() {
+		offset += int64(len(sc.Bytes())) + 1 // +1 for newline
+		if re.MatchString(sc.Text()) {
+			return sc.Text(), offset, nil
+		}
+	}
+	return "", fi.Size(), sc.Err()
+}
+
 func compilePattern(pattern string) (*regexp.Regexp, error) {
 	if pattern == "" {
 		return regexp.Compile(`.`)

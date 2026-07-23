@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/onsi/ginkgo/v2"
-	"github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	"github.com/vranyes/homelab-ingress/e2e/harness"
 )
@@ -24,64 +24,64 @@ import (
 //   - 1 target: A single backend pod; 20 GETs all return the same backend ID.
 //   - 2+ targets: Three backend pods; 20 GETs return ≥2 distinct backend IDs
 //     distributed roughly uniformly (within ±25%).
-var _ = ginkgo.Describe("one-lb matrix", func() {
-	ginkgo.DescribeTable("1 LB, N targets",
+var _ = Describe("one-lb matrix", func() {
+	DescribeTable("1 LB, N targets",
 		func(replicas int32, expectedDistinct int) {
 			lbName := fmt.Sprintf("one-lb-%d", replicas)
 			ctx, cancel := contextWithTimeout(120 * time.Second)
 			defer cancel()
 
-			ginkgo.By(fmt.Sprintf("deploying %d identicon backend(s) for %s", replicas, lbName))
+			By(fmt.Sprintf("deploying %d identicon backend(s) for %s", replicas, lbName))
 			if replicas > 0 {
-				gomega.Expect(harness.DeployBackend(ctx, sharedK8s(), e2eNamespace, lbName, replicas)).To(gomega.Succeed())
+				Expect(harness.DeployBackend(ctx, sharedK8s(), e2eNamespace, lbName, replicas)).To(Succeed())
 				defer func() { _ = harness.TearDownBackend(ctx, sharedK8s(), e2eNamespace, lbName) }()
 			} else {
-				gomega.Expect(harness.EnsureNamespace(ctx, sharedK8s(), e2eNamespace)).To(gomega.Succeed())
+				Expect(harness.EnsureNamespace(ctx, sharedK8s(), e2eNamespace)).To(Succeed())
 			}
 
-			ginkgo.By(fmt.Sprintf("creating LoadBalancer Service %s", lbName))
-			gomega.Expect(harness.CreateLBService(ctx, sharedK8s(), e2eNamespace, lbName, 80, 8080)).To(gomega.Succeed())
+			By(fmt.Sprintf("creating LoadBalancer Service %s", lbName))
+			Expect(harness.CreateLBService(ctx, sharedK8s(), e2eNamespace, lbName, 80, 8080)).To(Succeed())
 			defer func() { _ = harness.DeleteService(ctx, sharedK8s(), e2eNamespace, lbName) }()
 
-			ginkgo.By("waiting for the homelab-ingress finalizer to land")
-			gomega.Expect(harness.WaitForServiceFinalizer(ctx, sharedK8s(), e2eNamespace, lbName, 30*time.Second)).To(gomega.Succeed())
+			By("waiting for the homelab-ingress finalizer to land")
+			Expect(harness.WaitForServiceFinalizer(ctx, sharedK8s(), e2eNamespace, lbName, 30*time.Second)).To(Succeed())
 
 			if replicas == 0 {
 				// With no backends the controller requeues indefinitely without
 				// writing service status. Assert the macvlan has been created
 				// on the ingress side (via Health), but a status IP is NEVER set.
-				ginkgo.By("asserting no service status IP and an active macvlan on the ingress side")
+				By("asserting no service status IP and an active macvlan on the ingress side")
 				consistentlyNoStatusIP(ctx, e2eNamespace, lbName, 10*time.Second)
-				gomega.Eventually(func(g gomega.Gomega) {
+				Eventually(func(g Gomega) {
 					health, err := sharedRouter().Health(ctx, healthReq())
-					g.Expect(err).NotTo(gomega.HaveOccurred())
-					g.Expect(health.GetActiveMacvlans()).To(gomega.BeNumerically(">=", int32(1)),
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(health.GetActiveMacvlans()).To(BeNumerically(">=", int32(1)),
 						"expected an active macvlan even with 0 targets")
-				}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed())
+				}, 30*time.Second, 500*time.Millisecond).Should(Succeed())
 				return
 			}
 
-			ginkgo.By("waiting for the LoadBalancer Service to receive a status IP")
+			By("waiting for the LoadBalancer Service to receive a status IP")
 			lbIP, err := harness.WaitForServiceStatusIP(ctx, sharedK8s(), e2eNamespace, lbName, 60*time.Second)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Expect(lbIP).NotTo(gomega.BeEmpty())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lbIP).NotTo(BeEmpty())
 
-			ginkgo.By(fmt.Sprintf("firing 20 HTTP GETs against %s:80 expecting %d distinct backends", lbIP, expectedDistinct))
-			gomega.Eventually(func(g gomega.Gomega) {
+			By(fmt.Sprintf("firing 20 HTTP GETs against %s:80 expecting %d distinct backends", lbIP, expectedDistinct))
+			Eventually(func(g Gomega) {
 				ids, err := harness.CollectBackendIDs(ctx, lbIP+":80", 20, 30*time.Second)
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-				g.Expect(ids).To(gomega.HaveLen(20), "expected all 20 requests to hit a backend")
-				g.Expect(harness.AssertAllHit(ids, expectedDistinct)).To(gomega.Succeed(),
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(ids).To(HaveLen(20), "expected all 20 requests to hit a backend")
+				g.Expect(harness.AssertAllHit(ids, expectedDistinct)).To(Succeed(),
 					"distinct backend count != expected")
 				if expectedDistinct >= 2 {
-					g.Expect(harness.AssertRoughlyUniform(ids, 0.25)).To(gomega.Succeed(),
+					g.Expect(harness.AssertRoughlyUniform(ids, 0.25)).To(Succeed(),
 						"distribution not within ±25%% uniform")
 				}
-			}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
 		},
-		ginkgo.Entry("0 targets — no backends", int32(0), 0),
-		ginkgo.Entry("1 target",  int32(1), 1),
-		ginkgo.Entry("2+ targets (3 replicas)", int32(3), 3),
+		Entry("0 targets — no backends", int32(0), 0),
+		Entry("1 target", int32(1), 1),
+		Entry("2+ targets (3 replicas)", int32(3), 3),
 	)
 })
 
@@ -94,8 +94,8 @@ func consistentlyNoStatusIP(ctx context.Context, ns, name string, window time.Du
 	deadline := time.Now().Add(window)
 	for deadline.After(time.Now()) {
 		svc, err := harness.GetService(context.Background(), sharedK8s(), ns, name)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(harness.ServiceStatusIP(svc)).To(gomega.BeEmpty(),
+		Expect(err).NotTo(HaveOccurred())
+		Expect(harness.ServiceStatusIP(svc)).To(BeEmpty(),
 			"Service %s/%s should not have a status IP with 0 endpoints", ns, name)
 		time.Sleep(500 * time.Millisecond)
 	}

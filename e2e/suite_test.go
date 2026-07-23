@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/onsi/ginkgo/v2"
-	"github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
-	"github.com/vranyes/homelab-ingress/e2e/harness"
 	routerv1 "github.com/vranyes/homelab-ingress/controller/pkg/api/router/v1"
+	"github.com/vranyes/homelab-ingress/e2e/harness"
 	"google.golang.org/grpc"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -45,58 +45,58 @@ var shared = struct {
 	routerConn *grpc.ClientConn
 }{}
 
-func sharedK8s() client.Client             { return shared.k8s }
+func sharedK8s() client.Client                   { return shared.k8s }
 func sharedRouter() routerv1.RouterServiceClient { return shared.router }
 
 // TestE2E is the Ginkgo entry point. It is only compiled under -tags=e2e.
 func TestE2E(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "homelab-ingress e2e suite")
+	RegisterFailHandler(Fail)
+	RunSpecs(t, "homelab-ingress e2e suite")
 }
 
-var _ = ginkgo.BeforeSuite(func() {
+var _ = BeforeSuite(func() {
 	ctx := context.Background()
 
 	// Allow up to 5 minutes for full suite setup; we override the suite-level
 	// timeout indirectly by extending ctx via deadline in each step.
 	_ = ctx
 
-	ginkgo.By("creating shared e2e namespace " + e2eNamespace)
+	By("creating shared e2e namespace " + e2eNamespace)
 	cl, err := harness.NewClient()
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "k8s client")
+	Expect(err).NotTo(HaveOccurred(), "k8s client")
 	shared.k8s = cl
-	gomega.Expect(harness.EnsureNamespace(ctx, cl, e2eNamespace)).To(gomega.Succeed())
+	Expect(harness.EnsureNamespace(ctx, cl, e2eNamespace)).To(Succeed())
 
-	ginkgo.By("starting oidc-mock openrc service")
-	gomega.Expect(harness.StartService(ctx, "hl-ingress-oidc")).To(gomega.Succeed())
-	gomega.Expect(harness.WaitForOidc(ctx, oidcBase, 60*time.Second)).To(gomega.Succeed())
+	By("starting oidc-mock openrc service")
+	Expect(harness.StartService(ctx, "hl-ingress-oidc")).To(Succeed())
+	Expect(harness.WaitForOidc(ctx, oidcBase, 60*time.Second)).To(Succeed())
 
-	ginkgo.By("minting controller JWT and writing to " + tokenPath)
+	By("minting controller JWT and writing to " + tokenPath)
 	jwt, err := harness.MintToken(ctx, oidcBase, controllerSub, audience, 24*time.Hour)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(harness.WriteToken(tokenPath, jwt)).To(gomega.Succeed())
+	Expect(err).NotTo(HaveOccurred())
+	Expect(harness.WriteToken(tokenPath, jwt)).To(Succeed())
 
-	ginkgo.By("writing ingress config to " + ingressConfigPath)
-	gomega.Expect(harness.WriteIngressConfig(ingressConfigPath, harness.DefaultIngressConfig())).To(gomega.Succeed())
+	By("writing ingress config to " + ingressConfigPath)
+	Expect(harness.WriteIngressConfig(ingressConfigPath, harness.DefaultIngressConfig())).To(Succeed())
 
-	ginkgo.By("starting ingress openrc service and waiting for it to become healthy")
-	gomega.Expect(harness.StartService(ctx, "hl-ingress-ingress")).To(gomega.Succeed())
-	gomega.Expect(harness.WaitForIngress(ctx, ingressAddr, caPEMPath, tokenPath, 60*time.Second)).To(gomega.Succeed())
+	By("starting ingress openrc service and waiting for it to become healthy")
+	Expect(harness.StartService(ctx, "hl-ingress-ingress")).To(Succeed())
+	Expect(harness.WaitForIngress(ctx, ingressAddr, caPEMPath, tokenPath, 60*time.Second)).To(Succeed())
 
-	ginkgo.By("starting controller openrc service")
-	gomega.Expect(harness.StartService(ctx, "hl-ingress-controller")).To(gomega.Succeed())
-	gomega.Expect(harness.WaitForControllerReady(ctx, controllerLog, 60*time.Second)).To(gomega.Succeed())
+	By("starting controller openrc service")
+	Expect(harness.StartService(ctx, "hl-ingress-controller")).To(Succeed())
+	Expect(harness.WaitForControllerReady(ctx, controllerLog, 60*time.Second)).To(Succeed())
 
-	ginkgo.By("building router gRPC client shared across scenarios")
+	By("building router gRPC client shared across scenarios")
 	rClient, conn, err := harness.NewRouterClient(ingressAddr, tokenPath, caPEMPath)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	Expect(err).NotTo(HaveOccurred())
 	shared.router = rClient
 	shared.routerConn = conn
 })
 
-var _ = ginkgo.AfterSuite(func() {
+var _ = AfterSuite(func() {
 	ctx := context.Background()
-	ginkgo.By("stopping controller, ingress, oidc in reverse order (best effort)")
+	By("stopping controller, ingress, oidc in reverse order (best effort)")
 	_ = harness.StopService(ctx, "hl-ingress-controller")
 	_ = harness.StopService(ctx, "hl-ingress-ingress")
 	_ = harness.StopService(ctx, "hl-ingress-oidc")
@@ -104,7 +104,7 @@ var _ = ginkgo.AfterSuite(func() {
 		_ = shared.routerConn.Close()
 	}
 	if shared.k8s != nil {
-		ginkgo.By("deleting shared namespace " + e2eNamespace + " (best effort)")
+		By("deleting shared namespace " + e2eNamespace + " (best effort)")
 		_ = harness.DeleteNamespaceIfExists(ctx, shared.k8s, e2eNamespace)
 	}
 })
@@ -112,7 +112,7 @@ var _ = ginkgo.AfterSuite(func() {
 // failFast shells out to Ginkgo's Fail() so the suite can be invoked from
 // non-spec contexts (helpers) without going through Expect.
 func failFast(msg string) {
-	ginkgo.Fail(msg)
+	Fail(msg)
 }
 
 // ensureSuiteRunning verifies the shared fixtures were set up. Used by

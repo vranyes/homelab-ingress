@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"time"
 )
@@ -19,12 +20,24 @@ var ControllerReadyPattern = regexp.MustCompile(`starting manager`)
 var ControllerReconciledPattern = regexp.MustCompile(`(creating|updating load balancer on router|reconciled)`)
 
 // WaitForControllerReady polls `/var/log/hl-ingress/controller.log` until a
-// line matching ControllerReadyPattern appears, or `timeout` elapses.
+// NEW line matching ControllerReadyPattern appears, or `timeout` elapses.
+// It records the current file size before polling so it only matches lines
+// written after this call.
 func WaitForControllerReady(ctx context.Context, logPath string, timeout time.Duration) error {
+	fi, err := os.Stat(logPath)
+	if err != nil {
+		return fmt.Errorf("stat controller log: %w", err)
+	}
+	minSize := fi.Size()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if line, _ := GrepFile(logPath, ControllerReadyPattern.String()); line != "" {
+		line, offset, err := GrepFileAfter(logPath, ControllerReadyPattern.String(), minSize)
+		if err == nil && line != "" {
+			minSize = offset
 			return nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return err
 		}
 		select {
 		case <-ctx.Done():
