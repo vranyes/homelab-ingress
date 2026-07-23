@@ -1,2 +1,5 @@
+.e2e-vm/
+.lima/
 .gograph/
+bin/
 dist/
