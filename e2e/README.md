@@ -64,7 +64,7 @@ make test-e2e-shell
 make test-e2e-bringup
 
 # Tear down the VM:
-make test-e2e-down
+make remove-e2e-vm
 ```
 
 The same `make test-e2e` target runs in CI via `.github/workflows/e2e.yaml`.

@@ -1,21 +1,67 @@
 ROOT := $(CURDIR)
 LIMA_VM ?= hl-ingress-e2e
+BUILDER_VM := hl-ingress-e2e-builder
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+export LIMA_HOME ?= $(ROOT)/.lima
+# Lima-specific build variables
+BIN_DIR      := bin
+LIMA_GOOS    := linux   # Target OS for Lima VM
+# Detect host architecture → native VM arch + Go build target
+ifeq ($(UNAME_M),arm64)
+  LIMA_ARCH   := aarch64
+  LIMA_GOARCH := arm64
+else
+  LIMA_ARCH   := x86_64
+  LIMA_GOARCH := amd64
+endif
 
-.PHONY: help test test-unit _e2e-vm-boot test-e2e test-e2e-shell test-e2e-bringup test-e2e-down clean-e2e-vm
+# CoW-aware disk copy: clonefile on macOS, reflink on Linux
+ifeq ($(UNAME_S),Linux)
+  DISK_CP = cp --reflink=auto
+else
+  DISK_CP = cp -c
+endif
 
-help: ## Show this help
-	@echo "homelab-ingress Makefile targets:"
-	@echo "  test                Run unit tests, then e2e suite"
-	@echo "  test-unit           Run unit tests (in ingress + controller modules)"
-	@echo "  test-e2e            Boot lima VM, build binaries, run e2e tests inside it"
-	@echo "  test-e2e-shell      Boot lima VM (idempotent) and drop into an interactive shell"
-	@echo "  test-e2e-bringup    Boot lima VM and copy the repo in (no test run)"
-	@echo "  test-e2e-down       Stop and delete the lima VM"
-	@echo "  clean-e2e-vm        Alias of test-e2e-down"
-	@echo ""
-	@echo "E2E options:"
-	@echo "  E2E_KEEP_VM=1       Leave the VM running after test-e2e (for debugging)"
+E2E_DIR := $(ROOT)/.e2e-vm
+BASE_DISK := $(E2E_DIR)/disk.base
+E2E_MARKER := $(E2E_DIR)/.build-checksum
+
+ifeq ($(UNAME_S),Linux)
+  HASH_CMD = sha256sum
+else
+  HASH_CMD = shasum -a 256
+endif
+
+.PHONY: help test test-unit \
+        start-e2e-vm remove-e2e-vm \
+        build-e2e-binaries clean-e2e-binaries \
+        test-e2e test-e2e-down clean-e2e-vm
+
+# E2E binaries (built on host for Lima VM)
+$(BIN_DIR)/ingress: $(shell find ingress/cmd/ingress -name '*.go') \
+                    $(shell find ingress/internal -name '*.go')
+	mkdir -p $(BIN_DIR)
+	GOOS=$(LIMA_GOOS) GOARCH=$(LIMA_GOARCH) CGO_ENABLED=0 \
+		go build -o $@ ./ingress/cmd/ingress
+
+$(BIN_DIR)/controller: $(shell find controller/cmd/controller -name '*.go') \
+                       $(shell find controller/internal -name '*.go')
+	mkdir -p $(BIN_DIR)
+	GOOS=$(LIMA_GOOS) GOARCH=$(LIMA_GOARCH) CGO_ENABLED=0 \
+		go build -o $@ ./controller/cmd/controller
+
+$(BIN_DIR)/oidc-mock: $(shell find e2e/cmd/oidc-mock -name '*.go')
+	mkdir -p $(BIN_DIR)
+	GOOS=$(LIMA_GOOS) GOARCH=$(LIMA_GOARCH) CGO_ENABLED=0 \
+		go build -o $@ ./e2e/cmd/oidc-mock
+
+.PHONY: build-e2e-binaries
+build-e2e-binaries: $(BIN_DIR)/ingress $(BIN_DIR)/controller $(BIN_DIR)/oidc-mock
+
+.PHONY: clean-e2e-binaries
+clean-e2e-binaries:
+	rm -rf $(BIN_DIR)
 
 test: test-unit test-e2e ## Run unit tests, then e2e suite
 
@@ -29,55 +75,57 @@ endif
 	@echo "==> Running controller unit tests ($(UNAME_S))"
 	cd controller && go test ./internal/... -cover -v
 
-# Private: idempotently boot the lima VM and copy the repo in.
-_e2e-vm-boot:
-	@echo "==> Verifying limactl is installed"
-	@command -v limactl >/dev/null 2>&1 || { \
-		echo "ERROR: limactl not found on PATH."; \
-		echo "Install lima:"; \
-		echo "  macOS:  brew install lima"; \
-		echo "  Linux:  see https://lima-vm.io/docs/installation/"; \
-		exit 1; \
-	}
-	@echo "==> Idempotently starting lima VM '$(LIMA_VM)'"
-	-@limactl list 2>/dev/null | grep -q "^$(LIMA_VM) " || \
-		limactl start --tty=false --name=$(LIMA_VM) $(ROOT)/e2e-vm/lima.yaml
-	@echo "==> Copying repo into VM at /root/homelab-ingress/"
-	limactl shell $(LIMA_VM) -- sudo mkdir -p /root/homelab-ingress
-	tar czf - --no-xattrs -C $(ROOT) . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/
+# ------------------------------------------------------------------
+# E2E VM lifecycle
+# ------------------------------------------------------------------
 
-test-e2e: _e2e-vm-boot ## Boot lima VM, build binaries, run e2e suite
-	@echo "==> Building binaries and running e2e tests inside the VM"
-	limactl shell $(LIMA_VM) -- sudo sh -c '\
+$(E2E_DIR):
+	mkdir -p $(E2E_DIR)
+
+# Lima start flags: arch-aware image + VZ on macOS arm64
+LIMA_IMAGE := https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/cloud/nocloud_alpine-3.22.4-$(LIMA_ARCH)-uefi-cloudinit-r0.qcow2
+ifeq ($(UNAME_M),arm64)
+  LIMA_START_FLAGS := --vm-type=vz --set '.arch="$(LIMA_ARCH)"' --rosetta \
+                      --set '.images=[{"location":"$(LIMA_IMAGE)","arch":"$(LIMA_ARCH)"}]'
+else
+  LIMA_START_FLAGS := --set '.images=[{"location":"$(LIMA_IMAGE)","arch":"$(LIMA_ARCH)"}]'
+endif
+
+.PHONY: start-e2e-vm
+start-e2e-vm:
+	@echo "==> Booting clean VM from base image ($(LIMA_ARCH))"
+	limactl start --tty=false --name=$(LIMA_VM) $(LIMA_START_FLAGS) $(ROOT)/e2e-vm/lima.yaml
+	@echo "==> Copying e2e and controller directories into VM"
+	limactl shell $(LIMA_VM) -- sudo mkdir -p /root/homelab-ingress/e2e /root/homelab-ingress/controller
+	tar czf - --no-xattrs -C $(ROOT)/e2e . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/e2e/
+	tar czf - --no-xattrs -C $(ROOT)/controller . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/controller/
+
+remove-e2e-vm: ## Stop and delete the running VM instance
+	-@limactl stop $(LIMA_VM) 2>/dev/null || true
+	-@limactl delete $(LIMA_VM) 2>/dev/null || true
+
+# ------------------------------------------------------------------
+# E2E test targets
+# ------------------------------------------------------------------
+
+test-e2e: build-e2e-binaries ## Boot clean VM, copy pre-built binaries, run e2e tests
+	@echo "==> Copying and installing pre-built binaries"
+	tar czf - -C $(BIN_DIR) . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /tmp/
+	limactl shell $(LIMA_VM) -- sudo chmod +x /tmp/ingress /tmp/controller /tmp/oidc-mock
+	limactl shell $(LIMA_VM) -- sudo cp /tmp/ingress /usr/local/bin/
+	limactl shell $(LIMA_VM) -- sudo cp /tmp/controller /usr/local/bin/
+	limactl shell $(LIMA_VM) -- sudo cp /tmp/oidc-mock /usr/local/bin/
+	@echo "==> Running e2e tests inside the VM"
+	limactl shell $(LIMA_VM) -- sudo sh -c ' \
 		set -e; \
-		cd /root/homelab-ingress; \
 		export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; \
-		export CGO_ENABLED=0; \
 		echo "==> Waiting for k3s node to be Ready"; \
 		kubectl wait --for=condition=Ready node --all --timeout=60s; \
-		echo "==> Building binaries"; \
-		go build -o /usr/local/bin/ingress    ./ingress/cmd/ingress; \
-		go build -o /usr/local/bin/controller ./controller/cmd/controller; \
-		go build -o /usr/local/bin/oidc-mock  ./e2e/cmd/oidc-mock; \
 		echo "==> Running e2e tests"; \
-		cd e2e && go test -tags=e2e -timeout=25m -v ./... \
-	'
+		cd /root/homelab-ingress/e2e && go test -tags=e2e -timeout=25m -v ./...'
 	@echo "==> Stopping VM (best effort)"
 	@if [ -z "$(E2E_KEEP_VM)" ]; then \
-		limactl stop $(LIMA_VM); \
+		$(MAKE) remove-e2e-vm; \
 	else \
-		echo "==> E2E_KEEP_VM set, leaving VM running (run 'make test-e2e-down' to clean up)"; \
+		echo "==> E2E_KEEP_VM set, leaving VM running (run 'make remove-e2e-vm' to clean up)"; \
 	fi
-
-test-e2e-shell: _e2e-vm-boot ## Idempotently boot the VM, then drop user into an interactive shell
-	@echo "==> Entering interactive shell in VM '$(LIMA_VM)'"
-	limactl shell $(LIMA_VM) sh
-
-test-e2e-bringup: _e2e-vm-boot ## Boot lima VM and copy repo in (no test run)
-	@echo "==> VM '$(LIMA_VM)' is up and repo is at /root/homelab-ingress/"
-
-test-e2e-down: ## Stop and delete the lima VM (best effort)
-	-@limactl stop $(LIMA_VM)
-	-@limactl delete $(LIMA_VM)
-
-clean-e2e-vm: test-e2e-down ## Alias of test-e2e-down

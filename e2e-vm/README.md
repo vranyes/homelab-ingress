@@ -12,14 +12,13 @@ end-to-end test suite.
 | File              | Purpose                                                                                                                                                        |
 |-------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `lima.yaml`       | Lima VM definition. The `provision:` block is the authoritative bootstrap (apk packages, k3s install, br0 bridge, dnsmasq, three OpenRC services).             |
-| `cloud-init.yaml` | Mirror of the same bootstrap written as NoCloud user-data. Not consumed by lima; kept as a convenience for re-provisioning the same VM on a plain cloud image. |
 
 ## VM layout
 
 ```
 qemu (x86_64, 4 vCPU, 4GiB RAM, 30GiB disk)
  |
- +-- lima0   NAT, k3s flannel interface, default route
+ +-- eth0    NAT, k3s flannel interface, default route
  +-- br0     host-only bridge 10.44.0.1/24
               dnsmasq: 10.44.0.10-100 / 24h
               ingress attaches macvlan children here
