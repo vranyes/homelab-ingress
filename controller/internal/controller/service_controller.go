@@ -28,6 +28,14 @@ type ServiceReconciler struct {
 	RouterClient router.Client
 }
 
+// targetConvergenceDelay is the requeue interval after a successful
+// Create/Update that grew the LB's target set. The follow-up reconcile
+// converges once the router mirrors the desired target set, after which
+// the no-requeue path returns and no further churn is generated. Kept on
+// the order of the controller's IP-poller cadence (--poll-interval 5s) so
+// that an entire pod-startup wave settles within a small number of ticks.
+const targetConvergenceDelay = 5 * time.Second
+
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -187,7 +195,17 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 			logger.Info("router has not assigned IP yet, requeueing", "service", serviceKey)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-		return r.patchStatus(ctx, svc, entry.AssignedIP)
+		// Reschedule a single follow-up reconcile: the controller fetched the
+		// first ready endpoint slice during this pass, but other pods may not
+		// be ready yet. Without this requeue the Service would stay glued to
+		// whatever partial target set is in the router until the next
+		// EndpointSlice watch event fires (which can take >60s in steady state).
+		// The follow-up reconcile will short-circuit when the router already
+		// matches the desired target set.
+		if _, err := r.patchStatus(ctx, svc, entry.AssignedIP); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: targetConvergenceDelay}, nil
 	}
 
 	if portsChanged(existing.Ports, ports) {
@@ -198,6 +216,15 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			return ctrl.Result{}, fmt.Errorf("update on router: %w", err)
+		}
+		// Same convergence requeue as the Create branch: a single follow-up
+		// pass converges once all backing pods are ready. routesEqual() flips
+		// to false once steady state is reached, suppressing further requeues.
+		if existing.AssignedIP != "" {
+			if _, err := r.patchStatus(ctx, svc, existing.AssignedIP); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: targetConvergenceDelay}, nil
 		}
 	}
 
