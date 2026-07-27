@@ -40,9 +40,12 @@ const (
 // closure variables — that makes test ordering independent and avoids
 // stale captures when the same scenarios re-run on developer shells.
 var shared = struct {
-	k8s        client.Client
-	router     routerv1.RouterServiceClient
-	routerConn *grpc.ClientConn
+	k8s            client.Client
+	router         routerv1.RouterServiceClient
+	routerConn     *grpc.ClientConn
+	oidcProc       *harness.ManagedProcess
+	ingressProc    *harness.ManagedProcess
+	controllerProc *harness.ManagedProcess
 }{}
 
 func sharedK8s() client.Client                   { return shared.k8s }
@@ -61,14 +64,26 @@ var _ = BeforeSuite(func() {
 	// timeout indirectly by extending ctx via deadline in each step.
 	_ = ctx
 
+	By("verifying VEPA hairpin relay (ns-server + tc mirred + dnsmasq) is up")
+	Expect(harness.EnsureVepaRelayUp(ctx)).To(Succeed(),
+		"VEPA relay not healthy — re-run `make start-e2e-vm`; see diagnostic dump for details")
+
+	By("creating state and log directories")
+	_, err := harness.RunShell(ctx, "mkdir -p /var/log/hl-ingress /var/run/hl-ingress /var/lib/homelab-ingress /etc/homelab-ingress")
+	Expect(err).NotTo(HaveOccurred())
+
 	By("creating shared e2e namespace " + e2eNamespace)
 	cl, err := harness.NewClient()
 	Expect(err).NotTo(HaveOccurred(), "k8s client")
 	shared.k8s = cl
-	Expect(harness.EnsureNamespace(ctx, cl, e2eNamespace)).To(Succeed())
+	Eventually(harness.EnsureNamespace).WithArguments(ctx, cl, e2eNamespace).WithTimeout(5 * time.Second).Should(Succeed())
 
-	By("starting oidc-mock openrc service")
-	Expect(harness.StartService(ctx, "hl-ingress-oidc")).To(Succeed())
+	By("spawning oidc-mock")
+	shared.oidcProc, err = harness.Spawn(
+		"/usr/local/bin/oidc-mock", nil, nil,
+		"/var/log/hl-ingress/oidc.log",
+	)
+	Expect(err).NotTo(HaveOccurred())
 	Expect(harness.WaitForOidc(ctx, oidcBase, 60*time.Second)).To(Succeed())
 
 	By("minting controller JWT and writing to " + tokenPath)
@@ -79,12 +94,30 @@ var _ = BeforeSuite(func() {
 	By("writing ingress config to " + ingressConfigPath)
 	Expect(harness.WriteIngressConfig(ingressConfigPath, harness.DefaultIngressConfig())).To(Succeed())
 
-	By("starting ingress openrc service and waiting for it to become healthy")
-	Expect(harness.StartService(ctx, "hl-ingress-ingress")).To(Succeed())
+	By("spawning ingress and waiting for it to become healthy")
+	shared.ingressProc, err = harness.Spawn(
+		"/usr/local/bin/ingress",
+		[]string{"--config", ingressConfigPath, "--state-dir", "/var/lib/homelab-ingress"},
+		nil,
+		"/var/log/hl-ingress/ingress.log",
+	)
+	Expect(err).NotTo(HaveOccurred())
 	Expect(harness.WaitForIngress(ctx, ingressAddr, caPEMPath, tokenPath, 60*time.Second)).To(Succeed())
 
-	By("starting controller openrc service")
-	Expect(harness.StartService(ctx, "hl-ingress-controller")).To(Succeed())
+	By("spawning controller")
+	shared.controllerProc, err = harness.Spawn(
+		"/usr/local/bin/controller",
+		[]string{
+			"--router-addr", ingressAddr,
+			"--token-path", tokenPath,
+			"--ca-path", caPEMPath,
+			"--metrics-addr", ":8081",
+			"--poll-interval", "5s",
+		},
+		[]string{"KUBECONFIG=/etc/rancher/k3s/k3s.yaml"},
+		"/var/log/hl-ingress/controller.log",
+	)
+	Expect(err).NotTo(HaveOccurred())
 	Expect(harness.WaitForControllerReady(ctx, controllerLog, 60*time.Second)).To(Succeed())
 
 	By("building router gRPC client shared across scenarios")
@@ -97,9 +130,15 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	ctx := context.Background()
 	By("stopping controller, ingress, oidc in reverse order (best effort)")
-	_ = harness.StopService(ctx, "hl-ingress-controller")
-	_ = harness.StopService(ctx, "hl-ingress-ingress")
-	_ = harness.StopService(ctx, "hl-ingress-oidc")
+	if shared.controllerProc != nil {
+		_ = shared.controllerProc.Terminate(5 * time.Second)
+	}
+	if shared.ingressProc != nil {
+		_ = shared.ingressProc.Terminate(5 * time.Second)
+	}
+	if shared.oidcProc != nil {
+		_ = shared.oidcProc.Terminate(5 * time.Second)
+	}
 	if shared.routerConn != nil {
 		_ = shared.routerConn.Close()
 	}

@@ -83,107 +83,241 @@ caCerts:
 # guest boundary, so we don't need socket_vmnet or guest-to-host bridging.
 networks: []
 
-# Single inline provisioning script. `mode: system` runs each item as a
-# separate root shell; this is the bootstrap. The script installs packages,
-# k3s, sets up the br0 bridge idempotently, configures dnsmasq, and registers
-# three openrc services (oidc, ingress, controller) WITHOUT starting them —
-# the harness starts them in dependency order after writing config + token.
+# Provisioning scripts. `mode: system` runs each item as a separate root shell.
+# This bootstrap installs packages, k3s, sets up the hl-br0 bridge, stands up
+# the VEPA hairpin relay (netns + tc mirred) that lets production macvlan VEPA
+# children actually reach dnsmasq, and configures dnsmasq to run inside the
+# relay namespace. The test harness is responsible for spawning the ingress,
+# controller, and oidc-mock binaries directly as child processes.
+#
+# Topology (see e2e-vm/README.md "VEPA hairpin relay" for the full diagram):
+#
+#   root ns:                              ns-server (netns):
+#     hl-br0 (10.44.0.1/24)                 veth-outer (10.44.0.2/24)
+#       ├── lb-xxxxx  (macvlan VEPA)        dnsmasq bound to veth-outer
+#       └── veth-inner ──────────veth pair─────────┘
+#                                              tc qdisc ingress on veth-outer
+#                                              action mirred egress mirror
+#                                              (the "reflective relay")
+#
+# Without this relay, VEPA frames leaving a lb-xxxxx child can never reach
+# dnsmasq on the same host: the Linux macvlan driver drops frames whose
+# source MAC bounces back into the same network stack, and a single-host
+# bridge has no hardware hairpin. Moving dnsmasq into a separate netns plus
+# a tc mirred bounceback restores the L2 path the service expects from a
+# real reflective-relay switch port in production.
 provision:
 - mode: data
-  path: /etc/init.d/hl-ingress-oidc
   content: |
     #!/sbin/openrc-run
-    description="homelab-ingress oidc-mock"
-    command="/usr/local/bin/oidc-mock"
-    pidfile="/run/hl-ingress-oidc.pid"
-    output_log="/var/log/hl-ingress/oidc.log"
-    error_log="/var/log/hl-ingress/oidc.log"
-    command_background=true
-    command_user="root"
+    description="hl-br0 host-only bridge for homelab-ingress"
+    BRIDGE=hl-br0
+    ADDR=10.44.0.1/24
 
-    depend() {
-      need net
+    start() {
+      ip link add name "$BRIDGE" type bridge
+      ip addr flush dev "$BRIDGE"
+      ip link set "$BRIDGE" up
+      ip addr add "$ADDR" dev "$BRIDGE"
+      echo 0 > /sys/class/net/$BRIDGE/bridge/nf_call_iptables
+      echo 0 > /sys/class/net/$BRIDGE/bridge/nf_call_arptables
     }
 
-    start_pre() {
-      mkdir -p /var/run/hl-ingress /var/log/hl-ingress
+    stop() {
+      ip link set "$BRIDGE" down
+      ip link del "$BRIDGE"
     }
-  owner: "root:root"
+  path: /etc/init.d/hl-br0
+  owner: root:root
   permissions: 755
-  overwrite: false
+# hl-vepa-relay: brings up the ns-server network namespace + veth pair that
+# turns the single-host lima VM into something that looks, to the VEPA macvlan
+# children on hl-br0, like a physical switch port with reflective relay
+# enabled. The OpenRC unit orchestrates: netns creation, veth pair, enslaving
+# veth-inner to hl-br0, moving veth-outer into ns-server, addressing the
+# namespace side, and installing the tc mirred bounceback filter on
+# veth-outer. dnsmasq is run separately (see 03-dnsmasq-ns.sh below) so that
+# both services can be restarted independently when debugging.
 - mode: data
-  path: /etc/init.d/hl-ingress-ingress
   content: |
     #!/sbin/openrc-run
-    description="homelab-ingress ingress daemon"
-    command="/usr/local/bin/ingress"
-    command_args="--config /etc/homelab-ingress/config.yaml --state-dir /var/lib/homelab-ingress"
-    pidfile="/run/hl-ingress-ingress.pid"
-    output_log="/var/log/hl-ingress/ingress.log"
-    error_log="/var/log/hl-ingress/ingress.log"
-    command_background=true
-    command_user="root"
+    description="homelab-ingress VEPA hairpin relay (ns-server + tc mirred)"
+    NETNS=ns-server
+    BRIDGE=hl-br0
+    VINNER=veth-inner
+    VOUTER=veth-outer
+    NS_ADDR=10.44.0.2/24
 
     depend() {
-      need net
-      after dnsmasq
+      need hl-br0
     }
 
-    start_pre() {
-      mkdir -p /var/run/hl-ingress /var/log/hl-ingress /var/lib/homelab-ingress
+    start() {
+      # Create the namespace if missing.
+      if ! ip netns list | awk '{print $1}' | grep -qx "$NETNS"; then
+        ip netns add "$NETNS"
+      fi
+
+      # Idempotent veth creation: delete any leftover pair first.
+      ip link del "$VINNER" 2>/dev/null || true
+      ip link add "$VINNER" type veth peer name "$VOUTER"
+
+      # Root side: enslave veth-inner to hl-br0 and bring it up. Promisc
+      # mode is required so the bridge forwards frames to/from the macvlan
+      # children regardless of the child MACs (they are randomly generated
+      # per service and never learn into the bridge's FDB).
+      ip link set "$VINNER" master "$BRIDGE"
+      ip link set "$VINNER" up
+      ip link set "$VINNER" promisc on
+
+      # Move veth-outer into ns-server, bring up lo, address veth-outer.
+      ip link set "$VOUTER" netns "$NETNS"
+      ip -n "$NETNS" link set lo up
+      ip -n "$NETNS" addr add "$NS_ADDR" dev "$VOUTER"
+      ip -n "$NETNS" link set "$VOUTER" up
+      ip -n "$NETNS" link set "$VOUTER" promisc on
+
+      # Flush any stale tc state and install a minimally-correct reflective
+      # relay: every frame ingressing veth-outer is mirrored back out the
+      # same interface. This is the userspace emulation of an IEEE 802.1Qbg
+      # "Reflective Relay" port — frames the namespace received are
+      # re-injected egress on the same interface, so they travel back over
+      # the veth pair into hl-br0 and onward to the macvlan children.
+      # Because the mirred action runs inside ns-server's network stack,
+      # the root-ns macvlan driver does NOT see the re-injected frame as a
+      # same-stack loop, and VEPA's normal drop does not fire.
+      #
+      # IMPORTANT: use `mirred egress mirror` (not `redirect`). `redirect`
+      # marks the skb as stolen and skips local delivery, so dnsmasq's
+      # AF_PACKET/UDP socket never sees the broadcast and the DHCP exchange
+      # silently fails. `mirror` keeps the original ingress copy flowing up
+      # to the local listeners (dnsmasq) AND produces a copy that goes back
+      # out veth-outer toward hl-br0 — exactly the hairpin semantics the
+      # VEPA child expects.
+      tc -n "$NETNS" qdisc del dev "$VOUTER" ingress 2>/dev/null || true
+      tc -n "$NETNS" qdisc add dev "$VOUTER" ingress
+      tc -n "$NETNS" filter add dev "$VOUTER" ingress \
+          protocol all pref 1 u32 match u8 0 0 \
+          action mirred egress mirror dev "$VOUTER"
     }
-  owner: "root:root"
+
+    stop() {
+      # Destroying veth-inner in the root ns also drops veth-outer in the
+      # netns, and the tc qdisc goes with the interface. Leave NETNS in
+      # place so a later start() is cheap.
+      ip link del "$VINNER" 2>/dev/null || true
+    }
+
+    status() {
+      if ! ip netns list | awk '{print $1}' | grep -qx "$NETNS"; then
+        eend 1 "netns $NETNS missing"
+        return 1
+      fi
+      if ! ip -n "$NETNS" link show "$VOUTER" >/dev/null 2>&1; then
+        eend 1 "$VOUTER missing in $NETNS"
+        return 1
+      fi
+      if ! tc -n "$NETNS" qdisc show dev "$VOUTER" ingress \
+            | grep -q 'qdisc ingress'; then
+        eend 1 "tc ingress qdisc missing on $VOUTER"
+        return 1
+      fi
+      eend 0
+    }
+  path: /etc/init.d/hl-vepa-relay
+  owner: root:root
   permissions: 755
-  overwrite: false
+# dnsmasq config — note the interface is veth-outer, not hl-br0. dnsmasq
+# runs inside ns-server (see the wrapper script below) and binds to the
+# namespace-side veth. The macvlan children broadcast on hl-br0; the bridge
+# forwards the broadcast out veth-inner, the frame shows up at veth-outer in
+# the netns, the tc mirred rule bounces it back, and dnsmasq — which lives in
+# the same stack as veth-outer — sees the broadcast. Replies take the
+# inverse path and reach the child.
+#
+# `port=0` disables dnsmasq's DNS listener entirely. We do this so:
+# (a) it cannot rewrite the VM's /etc/resolv.conf when its OpenRC helper
+#     runs (`dnsmasq`'s start hook sometimes does this on Alpine), and
+# (b) DHCP offer won't carry option 6 (DNS server), so udhcpc leases
+#     obtained by macvlan children no longer clobber /etc/resolv.conf
+#     with `nameserver 10.44.0.1` (which is unreached because hl-br0 has
+#     no DNS listener). The ingress test workloads reach the LB IP on
+#     a directly-connected subnet; they never resolve anything, so no
+#     DHCP-advertised DNS is needed.
 - mode: data
-  path: /usr/local/bin/hl-ingress-controller-wrapper.sh
+  content: |
+    interface=veth-outer
+    bind-interfaces
+    port=0
+    dhcp-range=10.44.0.10,10.44.0.100,255.255.255.0,24h
+    dhcp-option=option:router,10.44.0.1
+    pid-file=/run/dnsmasq-ns.pid
+    log-facility=/var/log/dnsmasq-ns.log
+    log-dhcp
+  path: /etc/dnsmasq.d/hl-ingress.conf
+  owner: root:root
+  permissions: 644
+# Wrapper that runs dnsmasq inside ns-server in the foreground so OpenRC's
+# supervise-daemon retains lifetime control despite the netns exec indirection.
+- mode: data
   content: |
     #!/bin/sh
-    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-    exec /usr/local/bin/controller \
-        --router-addr 127.0.0.1:50051 \
-        --token-path /var/run/hl-ingress/token \
-        --ca-path /var/lib/homelab-ingress/ca.pem \
-        --metrics-addr :8081 \
-        --poll-interval 5s \
-        "$@"
-  owner: "root:root"
+    exec ip netns exec ns-server \
+        /usr/sbin/dnsmasq --no-daemon --keep-in-foreground \
+        --conf-file=/etc/dnsmasq.d/hl-ingress.conf \
+        --pid-file=/run/dnsmasq-ns.pid
+  path: /usr/local/sbin/dnsmasq-in-ns.sh
+  owner: root:root
   permissions: 755
-  overwrite: false
+# OpenRC unit around the wrapper. We use command_background=true + a pid-file
+# that dnsmasq itself writes (inside ns-server, on the shared /run).
 - mode: data
-  path: /etc/init.d/hl-ingress-controller
   content: |
     #!/sbin/openrc-run
-    description="homelab-ingress kubernetes controller"
-    command="/usr/local/bin/hl-ingress-controller-wrapper.sh"
-    pidfile="/run/hl-ingress-controller.pid"
-    output_log="/var/log/hl-ingress/controller.log"
-    error_log="/var/log/hl-ingress/controller.log"
+    description="dnsmasq for homelab-ingress (in ns-server netns)"
+    command="/usr/local/sbin/dnsmasq-in-ns.sh"
     command_background=true
-    command_user="root"
+    pidfile="/run/dnsmasq-ns.pid"
+    output_log="/var/log/dnsmasq-ns.openrc.log"
+    error_log="/var/log/dnsmasq-ns.openrc.log"
 
     depend() {
-      need net
-      after k3s
+      need hl-vepa-relay hl-br0
     }
 
     start_pre() {
-      mkdir -p /var/run/hl-ingress /var/log/hl-ingress
+      # ns-server must exist and veth-outer must be up; the relay unit handles
+      # that, but we double-check so a misconfigured boot fails loudly here
+      # rather than as a DHCP timeout 60s into the e2e suite.
+      ip netns list | awk '{print $1}' | grep -qx ns-server || {
+        eerror "ns-server netns missing; start hl-vepa-relay first"
+        return 1
+      }
+      ip -n ns-server link show veth-outer >/dev/null 2>&1 || {
+        eerror "veth-outer missing in ns-server"
+        return 1
+      }
+      mkdir -p /var/log
     }
-  owner: "root:root"
+  path: /etc/init.d/hl-dnsmasq-ns
+  owner: root:root
   permissions: 755
-  overwrite: false
-
+# Disable Alpine's stock dnsmasq OpenRC unit so it does not race the
+# netns-scoped one we install above. The stock unit, if enabled, would bind
+# to whatever interface /etc/dnsmasq.conf specifies and steal port 67 before
+# our wrapper has a chance to start.
 - mode: system
   script: |
     #!/bin/sh
     set -eu
-    # Lima's SLIRP networking may not push working DNS to the Alpine guest.
-    # Write public resolvers so apk / curl can resolve hostnames.
-    cat > /etc/resolv.conf <<'RESOLV'
-    nameserver 8.8.8.8
-    nameserver 1.1.1.1
-    RESOLV
+    rc-update del dnsmasq default 2>/dev/null || true
+    rc-update del dnsmasq 2>/dev/null || true
+    # Neutralize the stock /etc/dnsmasq.conf so an accidental `rc-service
+    # dnsmasq start` cannot compete with the in-netns unit.
+    cat > /etc/dnsmasq.conf <<'EOF'
+    # Disabled — homelab-ingress runs dnsmasq inside ns-server.
+    # See /etc/init.d/hl-dnsmasq-ns and /etc/dnsmasq.d/hl-ingress.conf.
+    EOF
 - mode: system
   file:
     url: ./scripts/01-packages.sh
@@ -191,49 +325,26 @@ provision:
   file:
     url: ./scripts/02-golang.sh
 - mode: system
-  file:
-    args:
-    - --disable=traefik
-    - --disable=servicelb
-    - --flannel-iface=eth0
-    url: ./scripts/03-k3s.sh
+  script: |
+    #!/bin/sh
+    set -eu
+
+    ########################################################################
+    # k3s install (with flannel disabled, since we use macvlan for the ingress)
+    ########################################################################
+    curl -sfL https://get.k3s.io | sh -s - --disable=traefik --disable=servicelb --flannel-iface=eth0
 
 - mode: system
   script: |
     #!/bin/sh
     set -eu
 
-    ########################################################################
-    # 3. hl-br0 host-only bridge (10.44.0.1/24). Dedicated bridge for the
-    #    homelab data plane: dnsmasq leases, macvlan children, nftables.
-    ########################################################################
-    ip addr flush dev hl-br0 2>/dev/null || true
-    ip link set hl-br0 up 2>/dev/null || true
-    ip addr add 10.44.0.1/24 dev hl-br0 2>/dev/null || true
+    # Bring everything up in dependency order. OpenRC's `depend()` blocks
+    # enforce: hl-br0 before hl-vepa-relay before hl-dnsmasq-ns.
+    rc-update add hl-br0 default
+    rc-update add hl-vepa-relay default
+    rc-update add hl-dnsmasq-ns default
 
-    # Disable bridge-netfilter so k3s iptables rules don't filter DHCP
-    # traffic between macvlan children and dnsmasq.
-    echo 0 > /sys/class/net/hl-br0/bridge/nf_call_iptables 2>/dev/null || true
-    echo 0 > /sys/class/net/hl-br0/bridge/nf_call_arptables 2>/dev/null || true
-
-- mode: system
-  script: |
-    ########################################################################
-    # 4. dnsmasq on hl-br0
-    ########################################################################
-    mkdir -p /etc/dnsmasq.d
-    cat > /etc/dnsmasq.d/hl-ingress.conf <<'DNSMASQ'
-    interface=hl-br0
-    bind-interfaces
-    dhcp-range=10.44.0.10,10.44.0.100,255.255.255.0,24h
-    DNSMASQ
-    if ! rc-service dnsmasq status >/dev/null 2>&1; then
-        rc-update add dnsmasq default
-    fi
-    rc-service dnsmasq restart || true
-
-- mode: system
-  script: |
-    rc-update add hl-ingress-oidc default
-    rc-update add hl-ingress-ingress default
-    rc-update add hl-ingress-controller default
+    rc-service hl-br0 start
+    rc-service hl-vepa-relay start
+    rc-service hl-dnsmasq-ns start

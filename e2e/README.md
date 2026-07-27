@@ -10,24 +10,26 @@ topology inside a single lima VM (Alpine `linux-virt`):
 
 - **ingress** (`ingress/cmd/ingress`) — the data-plane daemon that creates macvlan
   interfaces, gets DHCP leases via dnsmasq, and installs nftables DNAT rules.
-  Runs in-VM under the `hl-ingress-ingress` openrc service.
+  Spawned as a child process by the test harness.
 - **controller** (`controller/cmd/controller`) — the Kubernetes controller that
   watches `Service` objects of type `LoadBalancer` with `loadBalancerClass: homelab-ingress`.
-  Runs in-VM as a plain process under the `hl-ingress-controller` openrc service.
+  Spawned as a child process by the test harness.
   Talks to the k3s API server via `/etc/rancher/k3s/k3s.yaml`.
 - **oidc-mock** (`e2e/cmd/oidc-mock`) — a tiny mock OIDC provider used by the ingress's
   `auth.NewTokenVerifier`.
   Serves `.well-known/openid-configuration`, JWKS, and a `/token` endpoint that
   mints RS256 JWTs signed with a baked-in RSA key.
-  Runs as a plain VM process on `127.0.0.1:8080` under the `hl-ingress-oidc` openrc
-  service.
+  Spawned as a child process by the test harness on `127.0.0.1:8080`.
 - **traefik/whoami** — replaced by **`identicon`** (`e2e/cmd/identicon`), a tiny
   Go HTTP echo server that returns the pod hostname in the response body. When
   `backend.mode: fake` in the ingress config YAML the ingress daemon itself starts
   an identicon process as a child; for cluster-backed backends the identicon image
   needs to be loaded into k3s (see Known Issues below).
 
-The k3s cluster runs in the VM and schedules whoami pods.
+The test harness spawns the three binaries in dependency order (oidc → ingress →
+controller) during `BeforeSuite` and terminates them in reverse order during
+`AfterSuite`. Each process is sent SIGTERM followed by SIGKILL after a 5-second
+grace period. The k3s cluster runs in the VM and schedules whoami pods.
 The controller reads EndpointSlices from k3s and drives the ingress via gRPC.
 The test binary itself runs in-VM as root (via `limactl exec ... go test -tags=e2e`);
 it creates Service objects in k3s, mutates the OIDC token file, fires HTTP traffic
@@ -46,7 +48,6 @@ at allocated LB IPs, and inspects nftables and log files for assertions.
 | `churn_test.go`                  | 1→0   | 1          | macvlan gone; nftables chain gone; Service finalizer removed                                       |
 | `churn_test.go`                  | 0→1   | 1          | recreate within 10s; reconverges within 30s                                                        |
 | `oidc_reject_test.go`            | 1     | 1          | mutated token (aud=bogus) rejected; controller log shows Unauthenticated; no Service status IP set |
-| `controller_restart_test.go`     | 1     | 3          | `pkill -9 controller`; openrc respawns; status IP unchanged; round-robin resumes                   |
 
 ## Running the suite
 
@@ -83,7 +84,8 @@ e2e/
 ├── cmd/
 │   └── oidc-mock/main.go                     mock OIDC provider (RS256, embedded PEM)
 └── harness/                                  helpers imported by scenarios
-    ├── vm.go                                 openrc service control, file IO
+    ├── vm.go                                 shell helpers, file IO
+    ├── process.go                            Spawn / ManagedProcess lifecycle
     ├── k8s.go                                controller-runtime client + Service/Deployment factories
     ├── backends.go                           DeployBackend / TearDownBackend wrappers
     ├── oidc.go                               MintToken / WaitForOidc
@@ -121,7 +123,7 @@ Affected specs:
 containerd, or replace it with a binary-backed backend that doesn't need a
 container registry. See `e2e-vm/RUNBOOK.md` for the debug guide.
 
-**`zero_lb`**, **`oidc_reject`**, and **`controller_restart`** pass — they
+**`zero_lb`** and **`oidc_reject`** pass — they
 require no k8s backend Deployment. Run them to verify data-plane and
 controller logic while the image issue is outstanding:
 

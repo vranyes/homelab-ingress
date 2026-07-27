@@ -1,9 +1,9 @@
 // Package harness contains helpers for the homelab-ingress Ginkgo e2e suite.
 //
 // The test binary runs inside the lima VM as root. These helpers wrap shell
-// commands (executed via `sh -c`, not via limactl), file IO, and OpenRC service
-// supervision. They intentionally avoid Ginkgo/Gomega imports so they can be
-// invoked from any Go context, including ad-hoc debugging utilities.
+// commands (executed via `sh -c`, not via limactl) and file IO.
+// They intentionally avoid Ginkgo/Gomega imports so they can be invoked from
+// any Go context, including ad-hoc debugging utilities.
 package harness
 
 import (
@@ -20,75 +20,6 @@ func RunShell(ctx context.Context, script string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
 	out, err := cmd.CombinedOutput()
 	return out, err
-}
-
-// RunShellLines joins the given lines with newlines and runs them as a single
-// shell script.
-func RunShellLines(ctx context.Context, lines ...string) ([]byte, error) {
-	return RunShell(ctx, strings.Join(lines, "\n"))
-}
-
-// StartService starts an OpenRC service. "already started" is treated as
-// success.
-func StartService(ctx context.Context, name string) error {
-	out, err := RunShell(ctx, fmt.Sprintf("rc-service %s start", name))
-	if err != nil {
-		if strings.Contains(strings.ToLower(string(out)), "already started") {
-			return nil
-		}
-		return fmt.Errorf("rc-service %s start: %w: %s", name, err, string(out))
-	}
-	return nil
-}
-
-// StopService stops an OpenRC service. "not started" / "service not running"
-// are treated as success.
-func StopService(ctx context.Context, name string) error {
-	out, err := RunShell(ctx, fmt.Sprintf("rc-service %s stop", name))
-	if err != nil {
-		lowered := strings.ToLower(string(out))
-		if strings.Contains(lowered, "not started") || strings.Contains(lowered, "not running") {
-			return nil
-		}
-		return fmt.Errorf("rc-service %s stop: %w: %s", name, err, string(out))
-	}
-	return nil
-}
-
-// RestartService restarts an OpenRC service.
-func RestartService(ctx context.Context, name string) error {
-	out, err := RunShell(ctx, fmt.Sprintf("rc-service %s restart", name))
-	if err != nil {
-		return fmt.Errorf("rc-service %s restart: %w: %s", name, err, string(out))
-	}
-	return nil
-}
-
-// ServiceStatus returns the output of `rc-service <name> status`.
-func ServiceStatus(ctx context.Context, name string) (string, error) {
-	out, err := RunShell(ctx, fmt.Sprintf("rc-service %s status", name))
-	return strings.TrimSpace(string(out)), err
-}
-
-// KillService hard-kills the underlying binary for an OpenRC service via
-// `pkill -9 -f <binaryName>` and then waits for ServiceStatus to stop
-// reporting "running". OpenRC's supervise-daemon should respawn the process
-// shortly afterwards.
-func KillService(ctx context.Context, binaryName string) error {
-	if _, err := RunShell(ctx, fmt.Sprintf("pkill -9 -f %s || true", binaryName)); err != nil {
-		return fmt.Errorf("pkill %s: %w", binaryName, err)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		status, _ := ServiceStatus(ctx, strings.ReplaceAll(binaryName, "/usr/local/bin/", ""))
-		if strings.Contains(strings.ToLower(status), "stopped") ||
-			strings.Contains(strings.ToLower(status), "crashed") ||
-			strings.Contains(strings.ToLower(status), "inactive") {
-			return nil
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return nil
 }
 
 // FileExists reports whether the given path exists.
@@ -150,4 +81,179 @@ func dirOf(path string) string {
 		return path[:i]
 	}
 	return "."
+}
+
+// EnsureVepaRelayUp is the e2e suite's preflight check for the VEPA hairpin
+// relay that the lima.yaml provisioning stands up. It is strictly a reader:
+// the relay is created by /etc/init.d/hl-vepa-relay (which in turn uses
+// `ip netns` + `tc mirred`) and dnsmasq runs inside that namespace via
+// /etc/init.d/hl-dnsmasq-ns. This helper verifies all of the pieces are in
+// place before any test runs and, on failure, dumps diagnostic state so the
+// developer does not have to wait for a 60-second `WaitForServiceStatusIP`
+// timeout to learn the relay is busted.
+//
+// On success, returns nil. On failure, returns an error whose message
+// embeds the full `ip netns exec ns-server ...` diagnostic dump.
+func EnsureVepaRelayUp(ctx context.Context) error {
+	const (
+		netns   = "ns-server"
+		vouter  = "veth-outer"
+		vinner  = "veth-inner"
+		bridge  = "hl-br0"
+		logPath = "/var/log/dnsmasq-ns.log"
+	)
+
+	// `out` and `err` are declared once and reused across the checks below.
+	// Earlier iterations shadowed them with `:=` inside `if` initializers,
+	// which silently dropped the per-step output once the if-block went out
+	// of scope and caused the post-block `strings.Contains(string(out), ...)`
+	// to keep testifying against the netns-list output from step 1.
+	var (
+		out []byte
+		err error
+	)
+
+	// 1) netns exists.
+	out, err = RunShell(ctx, "ip netns list | awk '{print $1}'")
+	if err != nil {
+		return fmt.Errorf("ip netns list: %w: %s", err, string(out))
+	}
+	if !containsLine(string(out), netns) {
+		return relayError(ctx, fmt.Sprintf("netns %q missing — re-run `make start-e2e-vm`", netns))
+	}
+
+	// 2) veth-outer is present and UP inside the namespace.
+	out, err = RunShell(ctx, fmt.Sprintf("ip -n %s -o link show %s", netns, vouter))
+	if err != nil {
+		return relayError(ctx, fmt.Sprintf("%s missing in %s: %s", vouter, netns, string(out)))
+	}
+	if !strings.Contains(string(out), "UP") {
+		return relayError(ctx, fmt.Sprintf("%s is not UP in %s: %s", vouter, netns, string(out)))
+	}
+
+	// 3) veth-inner is enslaved to hl-br0 and UP in the root ns.
+	out, err = RunShell(ctx, fmt.Sprintf("ip -o link show %s", vinner))
+	if err != nil {
+		return relayError(ctx, fmt.Sprintf("%s missing in root ns: %s", vinner, string(out)))
+	}
+	if !strings.Contains(string(out), "UP") {
+		return relayError(ctx, fmt.Sprintf("%s is not UP in root ns: %s", vinner, string(out)))
+	}
+	out, err = RunShell(ctx, fmt.Sprintf("bridge link show dev %s", vinner))
+	if err != nil || !strings.Contains(string(out), bridge) {
+		return relayError(ctx, fmt.Sprintf("%s not enslaved to %s (bridge link show: %s, err=%v)", vinner, bridge, string(out), err))
+	}
+
+	// 4) The tc mirred bounceback filter is installed on veth-outer. We
+	//    specifically assert `Egress Mirror` (not `Egress Redirect`):
+	//    `redirect` marks the skb stolen and skips local delivery, so
+	//    dnsmasq's UDP socket never sees the broadcast and DHCP silently
+	//    times out. A relay misconfigured with `redirect` would otherwise
+	//    pass every other check here and only fail as a 60s test timeout.
+	out, err = RunShell(ctx, fmt.Sprintf("tc -n %s filter show dev %s ingress", netns, vouter))
+	if err != nil {
+		return relayError(ctx, fmt.Sprintf("tc filter show failed: %v: %s", err, string(out)))
+	}
+	if !strings.Contains(string(out), "mirred") {
+		return relayError(ctx, fmt.Sprintf("tc mirred filter missing on %s in %s (tc output: %s)", vouter, netns, string(out)))
+	}
+	if !strings.Contains(string(out), "Egress Mirror") {
+		return relayError(ctx, fmt.Sprintf(
+			"tc mirred on %s in %s is not `Egress Mirror` — likely configured as `redirect`, "+
+				"which steals the skb and prevents dnsmasq from receiving broadcasts. "+
+				"Re-provision the VM with the latest e2e-vm/lima.yaml. (tc output: %s)",
+			vouter, netns, string(out)))
+	}
+
+	// 5) dnsmasq is running inside the namespace and has bound to UDP/67.
+	//    We check via ss(8) inside the netns because the listening socket
+	//    exists only in ns-server's per-netns hash table.
+	out, err = RunShell(ctx, fmt.Sprintf("ip netns exec %s ss -lun '( sport = 67 )'", netns))
+	if err != nil {
+		// ss returns non-zero when no socket matches; treat as relay failure.
+		return relayError(ctx, fmt.Sprintf("ss UDP/67 probe failed inside %s: %s", netns, string(out)))
+	}
+	if !strings.Contains(string(out), ":67") {
+		// dnsmasq may still be starting — give it a short grace window.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+			out, _ = RunShell(ctx, fmt.Sprintf("ip netns exec %s ss -lun '( sport = 67 )'", netns))
+			if strings.Contains(string(out), ":67") {
+				break
+			}
+		}
+		if !strings.Contains(string(out), ":67") {
+			return relayError(ctx, fmt.Sprintf("dnsmasq not listening on UDP/67 inside %s — check %s and the hl-dnsmasq-ns service", netns, logPath))
+		}
+	}
+
+	return nil
+}
+
+// relayError builds a detailed error string that embeds the most-relevant
+// diagnostic dumps so the suite failure message is actionable straight from
+// the Ginkgo output, rather than forcing a developer to shell into the VM
+// and re-run probes.
+func relayError(ctx context.Context, msg string) error {
+	dump := []string{
+		"--- VEPA relay diagnostic dump ---",
+		msg,
+		"",
+		"== ip netns list ==",
+	}
+	if out, err := RunShell(ctx, "ip netns list"); err == nil {
+		dump = append(dump, strings.TrimSpace(string(out)))
+	} else {
+		dump = append(dump, fmt.Sprintf("(failed: %v)", err))
+	}
+	dump = append(dump, "", "== root-ns links (hl-br0, veth-*) ==")
+	if out, err := RunShell(ctx, "ip -o link show | grep -E 'hl-br0|veth-' || true"); err == nil {
+		dump = append(dump, strings.TrimSpace(string(out)))
+	} else {
+		dump = append(dump, fmt.Sprintf("(failed: %v)", err))
+	}
+	dump = append(dump, "", "== ns-server links + addrs ==")
+	if out, err := RunShell(ctx, "ip -n ns-server -br addr"); err == nil {
+		dump = append(dump, strings.TrimSpace(string(out)))
+	} else {
+		dump = append(dump, fmt.Sprintf("(failed: %v)", err))
+	}
+	dump = append(dump, "", "== ns-server tc qdisc + filters on veth-outer ==")
+	if out, err := RunShell(ctx, "tc -n ns-server qdisc show dev veth-outer; tc -n ns-server filter show dev veth-outer ingress"); err == nil {
+		dump = append(dump, strings.TrimSpace(string(out)))
+	} else {
+		dump = append(dump, fmt.Sprintf("(failed: %v)", err))
+	}
+	dump = append(dump, "", "== OpenRC status ==")
+	if out, err := RunShell(ctx, "rc-service hl-br0 status; rc-service hl-vepa-relay status; rc-service hl-dnsmasq-ns status"); err == nil {
+		dump = append(dump, strings.TrimSpace(string(out)))
+	} else {
+		dump = append(dump, fmt.Sprintf("(command failed: %v)", err))
+	}
+	dump = append(dump, "", "== tail /var/log/dnsmasq-ns.log ==")
+	if out, err := RunShell(ctx, "tail -n 20 /var/log/dnsmasq-ns.log 2>/dev/null || true"); err == nil {
+		dump = append(dump, strings.TrimSpace(string(out)))
+	}
+	dump = append(dump, "", "== tail /var/log/dnsmasq-ns.openrc.log ==")
+	if out, err := RunShell(ctx, "tail -n 20 /var/log/dnsmasq-ns.openrc.log 2>/dev/null || true"); err == nil {
+		dump = append(dump, strings.TrimSpace(string(out)))
+	}
+	return fmt.Errorf("%s", strings.Join(dump, "\n"))
+}
+
+// containsLine is a tiny helper that checks whether `s` contains a line equal
+// to `target` (no leading/trailing whitespace). Used so `ip netns list`'s
+// trailing " (id: N)" annotations don't break exact match checks.
+func containsLine(s, target string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) == target {
+			return true
+		}
+	}
+	return false
 }

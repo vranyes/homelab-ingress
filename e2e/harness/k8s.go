@@ -56,11 +56,19 @@ func EnsureNamespace(ctx context.Context, cl client.Client, name string) error {
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 	}
-	if err := cl.Create(ctx, ns); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil
+	k := types.NamespacedName{Name: name}
+	err := cl.Get(ctx, k, ns)
+	if apierrors.IsNotFound(err) {
+		if err := cl.Create(ctx, ns); err != nil {
+			return fmt.Errorf("create namespace: %w", err)
 		}
-		return err
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get namespace: %w", err)
+	}
+	if ns.ObjectMeta.DeletionTimestamp != nil {
+		return fmt.Errorf("namespace %s is being deleted", name)
 	}
 	return nil
 }
@@ -272,5 +280,5 @@ func ScaleDeployment(ctx context.Context, cl client.Client, ns, name string, rep
 	return cl.Update(ctx, dep)
 }
 
-func int64Ptr(i int64) *int64        { return &i }
-func stringPtr(s string) *string     { return &s }
+func int64Ptr(i int64) *int64    { return &i }
+func stringPtr(s string) *string { return &s }

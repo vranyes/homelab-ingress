@@ -23,19 +23,14 @@ import (
 var _ = Describe("oidc rejection", func() {
 	It("rejects a wrong-audience token with Unauthenticated", func() {
 		ctx, cancel := contextWithTimeout(120 * time.Second)
-		defer cancel()
+		DeferCleanup(cancel)
 
 		// Save the original (good) token so we can restore it for the rest of
 		// the suite. AfterAll/BeforeAll typically handles state, but this
 		// scenario must NOT leak the bad token to subsequent scenarios.
 		good, err := harness.ReadFile(tokenPath)
 		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = harness.MutateToken(tokenPath, string(good))
-			// Give the controller a moment to pick up the restored token via
-			// its next RPC.
-			time.Sleep(2 * time.Second)
-		}()
+		DeferCleanup(harness.MutateToken, tokenPath, string(good))
 
 		By("minting a token with aud=bogus and writing it to " + tokenPath)
 		bad, err := harness.BadAudienceToken(ctx, oidcBase, controllerSub)
@@ -44,9 +39,12 @@ var _ = Describe("oidc rejection", func() {
 
 		By("triggering a controller reconcile by creating a trivial LB Service")
 		lbName := "oidc-reject"
-		Expect(harness.EnsureNamespace(ctx, sharedK8s(), e2eNamespace)).To(Succeed())
+		Eventually(harness.EnsureNamespace).
+			WithTimeout(5*time.Second).
+			WithArguments(ctx, sharedK8s(), e2eNamespace).
+			Should(Succeed())
 		Expect(harness.CreateLBService(ctx, sharedK8s(), e2eNamespace, lbName, 80, 8080)).To(Succeed())
-		defer func() { _ = harness.DeleteService(ctx, sharedK8s(), e2eNamespace, lbName) }()
+		DeferCleanup(harness.DeleteService, sharedK8s(), e2eNamespace, lbName)
 
 		// Unauthenticated is not in IsRetryable, so the controller logs an
 		// error containing "get from router" or "create on router" with the
@@ -54,12 +52,10 @@ var _ = Describe("oidc rejection", func() {
 		By("waiting for the controller log to surface an Unauthenticated error")
 		// Status text in gRPC errors contains "Unauthenticated" when the
 		// interceptor rejects the token (see ingress/internal/auth/auth.go).
-		Eventually(func(g Gomega) {
-			count, err := harness.GrepCountFile(controllerLog, "Unauthenticated")
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(count).To(BeNumerically(">", 0),
-				"expected controller log to surface Unauthenticated after bad token mutation")
-		}, 30*time.Second, 500*time.Millisecond).Should(Succeed())
+		Eventually(harness.GrepCountFile).
+			WithTimeout(30*time.Second).
+			WithArguments(controllerLog, "Unauthenticated").
+			Should(BeNumerically(">", 0), "expected controller log to surface Unauthenticated after bad token mutation")
 
 		By("verifying that the Service did NOT receive a status IP (reconciler stalled)")
 		Consistently(func(g Gomega) {

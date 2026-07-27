@@ -29,35 +29,47 @@ var _ = Describe("one-lb matrix", func() {
 		func(replicas int32, expectedDistinct int) {
 			lbName := fmt.Sprintf("one-lb-%d", replicas)
 			ctx, cancel := contextWithTimeout(120 * time.Second)
-			defer cancel()
+			DeferCleanup(cancel)
 
 			By(fmt.Sprintf("deploying %d identicon backend(s) for %s", replicas, lbName))
 			if replicas > 0 {
 				Expect(harness.DeployBackend(ctx, sharedK8s(), e2eNamespace, lbName, replicas)).To(Succeed())
-				defer func() { _ = harness.TearDownBackend(ctx, sharedK8s(), e2eNamespace, lbName) }()
+				DeferCleanup(harness.TearDownBackend, ctx, sharedK8s(), e2eNamespace, lbName)
 			} else {
-				Expect(harness.EnsureNamespace(ctx, sharedK8s(), e2eNamespace)).To(Succeed())
+				Eventually(harness.EnsureNamespace).
+					WithTimeout(5*time.Second).
+					WithArguments(ctx, sharedK8s(), e2eNamespace).
+					Should(Succeed())
 			}
 
 			By(fmt.Sprintf("creating LoadBalancer Service %s", lbName))
 			Expect(harness.CreateLBService(ctx, sharedK8s(), e2eNamespace, lbName, 80, 8080)).To(Succeed())
-			defer func() { _ = harness.DeleteService(ctx, sharedK8s(), e2eNamespace, lbName) }()
+			DeferCleanup(harness.DeleteService, ctx, sharedK8s(), e2eNamespace, lbName)
 
 			By("waiting for the homelab-ingress finalizer to land")
 			Expect(harness.WaitForServiceFinalizer(ctx, sharedK8s(), e2eNamespace, lbName, 30*time.Second)).To(Succeed())
 
 			if replicas == 0 {
 				// With no backends the controller requeues indefinitely without
-				// writing service status. Assert the macvlan has been created
-				// on the ingress side (via Health), but a status IP is NEVER set.
-				By("asserting no service status IP and an active macvlan on the ingress side")
+				// creating the LB on the router. The ingress daemon never
+				// provisions a macvlan interface (since it sees no
+				// CreateLoadBalancer RPC), no DHCP lease is acquired, no
+				// status.LoadBalancer.Ingress is written, and only the
+				// finalizer is added to the Service (see
+				// controller/internal/controller::(*ServiceReconciler).reconcileUpsert).
+				// Assert all three zero-state invariants.
+				By("asserting no service status IP, no nftables chains, and zero macvlans when there are no backends")
 				consistentlyNoStatusIP(ctx, e2eNamespace, lbName, 10*time.Second)
-				Eventually(func(g Gomega) {
+				Consistently(func(g Gomega) {
 					health, err := sharedRouter().Health(ctx, healthReq())
 					g.Expect(err).NotTo(HaveOccurred())
-					g.Expect(health.GetActiveMacvlans()).To(BeNumerically(">=", int32(1)),
-						"expected an active macvlan even with 0 targets")
-				}, 30*time.Second, 500*time.Millisecond).Should(Succeed())
+					g.Expect(health.GetActiveMacvlans()).To(BeZero(),
+						"with 0 backends the controller must not provision a macvlan")
+				}, 15*time.Second, 500*time.Millisecond).Should(Succeed())
+				Eventually(func(g Gomega) {
+					Expect(harness.AssertNoLBChains()).To(Succeed(),
+						"with 0 backends nftables should have no per-service chains")
+				}, 15*time.Second, 500*time.Millisecond).Should(Succeed())
 				return
 			}
 
