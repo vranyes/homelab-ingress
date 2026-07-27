@@ -36,7 +36,7 @@ endif
 .PHONY: help test test-unit \
         start-e2e-vm remove-e2e-vm \
         build-e2e-binaries clean-e2e-binaries \
-        test-e2e test-e2e-down clean-e2e-vm
+        test-e2e test-e2e-down
 
 # E2E binaries (built on host for Lima VM)
 $(BIN_DIR)/ingress: $(shell find ingress/cmd/ingress -name '*.go') \
@@ -95,10 +95,6 @@ endif
 start-e2e-vm:
 	@echo "==> Booting clean VM from base image ($(LIMA_ARCH))"
 	limactl start --tty=false --name=$(LIMA_VM) $(LIMA_START_FLAGS) $(ROOT)/e2e-vm/lima.yaml
-	@echo "==> Copying e2e and controller directories into VM"
-	limactl shell $(LIMA_VM) -- sudo mkdir -p /root/homelab-ingress/e2e /root/homelab-ingress/controller
-	tar czf - --no-xattrs -C $(ROOT)/e2e . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/e2e/
-	tar czf - --no-xattrs -C $(ROOT)/controller . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/controller/
 
 remove-e2e-vm: ## Stop and delete the running VM instance
 	-@limactl stop $(LIMA_VM) 2>/dev/null || true
@@ -109,6 +105,10 @@ remove-e2e-vm: ## Stop and delete the running VM instance
 # ------------------------------------------------------------------
 
 test-e2e: build-e2e-binaries ## Boot clean VM, copy pre-built binaries, run e2e tests
+	@echo "==> Copying e2e and controller directories into VM"
+	limactl shell $(LIMA_VM) -- sudo mkdir -p /root/homelab-ingress/e2e /root/homelab-ingress/controller
+	tar czf - --no-xattrs -C $(ROOT)/e2e . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/e2e/
+	tar czf - --no-xattrs -C $(ROOT)/controller . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/controller/
 	@echo "==> Copying and installing pre-built binaries"
 	tar czf - -C $(BIN_DIR) . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /tmp/
 	limactl shell $(LIMA_VM) -- sudo chmod +x /tmp/ingress /tmp/controller /tmp/oidc-mock
