@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -152,12 +153,27 @@ func main() {
 	sig := <-sigCh
 	logger.Info("received signal, shutting down", "signal", sig)
 
+	// Ordered shutdown. The naive order (linkMgr.DeleteAll before the
+	// deferred dhcpMgr.StopAll) tears interfaces down while the per-service
+	// DHCP clients are still trying to send their DHCP RELEASE frames,
+	// which the kernel then rejects with "no such network interface" via
+	// `nclient4.New(iface, ...)`. Stop the DHCP clients first so
+	// `real.go::release()` runs while every lb-* interface is still UP,
+	// then drain in-flight frames, then remove the interfaces, then drop
+	// the nftables table.
 	grpcServer.GracefulStop()
-	logger.Info("gRPC server stopped, cleaning up")
+	logger.Info("gRPC server stopped, dhcp clients stopping next")
 
-	iml.Cleanup()
+	dhcpMgr.Stop()
+	dhcpMgr.StopAll()
+
+	dhcpReleaseDrain := 2 * time.Second
+	logger.Info("waiting for DHCP RELEASE frames to egress", "drain", dhcpReleaseDrain)
+	time.Sleep(dhcpReleaseDrain)
+
 	linkMgr.DeleteAll()
 	linkMgr.ParentSetDown()
+	iml.Cleanup()
 
 	logger.Info("shutdown complete")
 }
