@@ -56,6 +56,43 @@ func parseHostname(body []byte) string {
 	return ""
 }
 
+// CollectBackendIDsFreshConn is like CollectBackendIDs but forces every HTTP
+// request to use a fresh TCP connection (DisableKeepAlives: true). This is
+// critical for testing round-robin numgen rules because keep-alive reuses the
+// same connection — and thus the same numgen evaluation — across requests.
+func CollectBackendIDsFreshConn(ctx context.Context, lbAddr string, n int, timeout time.Duration) ([]string, error) {
+	url := "http://" + lbAddr + "/"
+	transport := &http.Transport{DisableKeepAlives: true}
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: transport,
+	}
+	ids := make([]string, 0, n)
+	deadline := time.Now().Add(timeout)
+	for i := 0; i < n; i++ {
+		if time.Now().After(deadline) {
+			return ids, fmt.Errorf("collecting backend ids timed out after %s, collected %d/%d", timeout, len(ids), n)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return ids, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if id := parseHostname(body); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // DistinctIDs returns the sorted set of unique strings in `ids`.
 func DistinctIDs(ids []string) []string {
 	seen := make(map[string]struct{}, len(ids))
