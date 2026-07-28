@@ -2,6 +2,7 @@ package router
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -44,7 +45,7 @@ func (m *Manager) Reconcile() error {
 	}
 	for _, want := range snap.Services {
 		if err := m.AddRules(*want); err != nil {
-			errors.Join(e, errors.New("failed to add rules for service "+want.ServiceName+": "+err.Error()))
+			e = errors.Join(e, fmt.Errorf("failed to add rules for service %s: %w", want.ServiceName, err))
 		}
 	}
 	return e

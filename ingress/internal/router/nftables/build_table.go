@@ -235,6 +235,8 @@ func buildRoundRobinExprs(
 			RegProtoMin: regProto,
 		},
 
+		&expr.Counter{},
+
 		&expr.Verdict{
 			Kind: expr.VerdictAccept,
 		},

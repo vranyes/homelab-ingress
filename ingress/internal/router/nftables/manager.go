@@ -227,6 +227,7 @@ func (m *Manager) AddRules(service state.LBService) error {
 				Register: 0x1,
 				Data:     extIP.To4(),
 			},
+			&expr.Counter{},
 			&expr.Verdict{Kind: expr.VerdictDrop},
 		}})
 
