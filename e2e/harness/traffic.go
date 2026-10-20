@@ -12,10 +12,16 @@ import (
 
 // CollectBackendIDs fires `n` sequential HTTP GET requests to
 // `http://<lbAddr>/` (lbAddr = e.g. "10.44.0.42:80"), each with a 5s per-request
-// timeout, and returns the unique pod hostname from each successful response.
+// timeout, and returns the pod hostname from each successful response.
 // The hostname is extracted from the first line of the body returned by
 // traefik/whoami (format: "Hostname: <pod-name>"). Failed requests are
 // skipped — the returned slice may be shorter than `n`.
+//
+// WARNING: prefer CollectBackendIDsFreshConn for round-robin assertions.
+// Keep-alive reuses the same TCP connection — and thus the same numgen
+// evaluation — across requests, which under-counts distinct backends.
+// CollectBackendIDs is retained for the churn smoke checks where only
+// reachability (not distribution) matters.
 func CollectBackendIDs(ctx context.Context, lbAddr string, n int, timeout time.Duration) ([]string, error) {
 	url := "http://" + lbAddr + "/"
 	client := &http.Client{Timeout: 5 * time.Second}

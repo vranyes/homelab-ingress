@@ -22,12 +22,14 @@ var _ = Describe("two-lb-masq counter validation", func() {
 	It("should round-robin across 2 backends with zero drop-rule hits and masquerade", func() {
 		lbName := "two-lb-masq"
 		svcKey := e2eNamespace + "/" + lbName
-		ctx, cancel := contextWithTimeout(180 * time.Second)
+		ctx, cancel := contextWithTimeout(300 * time.Second)
 		DeferCleanup(cancel)
 
 		By("deploying 2 identicon backends for " + lbName)
 		Expect(harness.DeployBackend(ctx, sharedK8s(), e2eNamespace, lbName, 2)).To(Succeed())
 		DeferCleanup(harness.TearDownBackend, ctx, sharedK8s(), e2eNamespace, lbName)
+		By("waiting for backend pods to be Ready (fails fast on ImagePullBackOff)")
+		Expect(harness.WaitForBackendReady(ctx, sharedK8s(), e2eNamespace, lbName, 90*time.Second)).To(Succeed())
 
 		By("creating LoadBalancer Service " + lbName)
 		Expect(harness.CreateLBService(ctx, sharedK8s(), e2eNamespace, lbName, 80, 8080)).To(Succeed())
@@ -106,8 +108,13 @@ var _ = Describe("two-lb-masq counter validation", func() {
 
 // addPostroutingMasquerade adds a masquerade rule to the postrouting chain:
 //
-//	iifname "br-lan.10" oifname "br-lan.10" ct status dnat masquerade
+//	iifname "hl-br0" oifname "hl-br0" ct status dnat masquerade
 //
+// hl-br0 is the VM's equivalent of the production br-lan pair: the bridge
+// carrying both the LB IPs and the test client, so hairpinned (same-bridge
+// in/out) DNAT traffic matches. A previous revision used the production
+// interface names (br-lan.10), which do not exist in the VM — nftables
+// accepted the rule but it could never match, making the test vacuous.
 // Returns the rule handle for later deletion.
 func addPostroutingMasquerade(ctx context.Context) uint64 {
 	conn, err := nftables.New()
@@ -142,9 +149,9 @@ func addPostroutingMasquerade(ctx context.Context) uint64 {
 		Chain: postChain,
 		Exprs: []expr.Any{
 			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte("br-lan.10\x00")},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte("hl-br0\x00")},
 			&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte("br-lan.10\x00")},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte("hl-br0\x00")},
 			&expr.Ct{Key: expr.CtKeySTATUS, Register: 1},
 			&expr.Bitwise{
 				SourceRegister: 1,

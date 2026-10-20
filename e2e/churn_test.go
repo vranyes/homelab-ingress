@@ -28,14 +28,16 @@ var _ = Describe("churn — delete then recreate", func() {
 		By("deploying 1 backend + LB Service and waiting for status IP")
 		Expect(harness.DeployBackend(ctx, sharedK8s(), e2eNamespace, lbName, 1)).To(Succeed())
 		defer func() { _ = harness.TearDownBackend(ctx, sharedK8s(), e2eNamespace, lbName) }()
+		By("waiting for backend pods to be Ready (fails fast on ImagePullBackOff)")
+		Expect(harness.WaitForBackendReady(ctx, sharedK8s(), e2eNamespace, lbName, 90*time.Second)).To(Succeed())
 		Expect(harness.CreateLBService(ctx, sharedK8s(), e2eNamespace, lbName, 80, 8080)).To(Succeed())
 
 		ip, err := harness.WaitForServiceStatusIP(ctx, sharedK8s(), e2eNamespace, lbName, 60*time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ip).NotTo(BeEmpty())
 
-		By("verifying traffic flows before delete")
-		ids, err := harness.CollectBackendIDs(ctx, ip+":80", 10, 15*time.Second)
+		By("verifying traffic flows before delete (fresh connections)")
+		ids, err := harness.CollectBackendIDsFreshConn(ctx, ip+":80", 10, 15*time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(harness.AssertAllHit(ids, 1)).To(Succeed())
 
@@ -67,6 +69,8 @@ var _ = Describe("churn — delete then recreate", func() {
 		By("deploying 1 backend + LB Service")
 		Expect(harness.DeployBackend(ctx, sharedK8s(), e2eNamespace, lbName, 1)).To(Succeed())
 		defer func() { _ = harness.TearDownBackend(ctx, sharedK8s(), e2eNamespace, lbName) }()
+		By("waiting for backend pods to be Ready (fails fast on ImagePullBackOff)")
+		Expect(harness.WaitForBackendReady(ctx, sharedK8s(), e2eNamespace, lbName, 90*time.Second)).To(Succeed())
 		Expect(harness.CreateLBService(ctx, sharedK8s(), e2eNamespace, lbName, 80, 8080)).To(Succeed())
 
 		ip1, err := harness.WaitForServiceStatusIP(ctx, sharedK8s(), e2eNamespace, lbName, 60*time.Second)
@@ -90,7 +94,7 @@ var _ = Describe("churn — delete then recreate", func() {
 		// same address inside its lease window) but the test only requires
 		// *some* reachable IP. We assert traffic flows regardless.
 		Eventually(func(g Gomega) {
-			ids, err := harness.CollectBackendIDs(ctx, ip2+":80", 10, 15*time.Second)
+			ids, err := harness.CollectBackendIDsFreshConn(ctx, ip2+":80", 10, 15*time.Second)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(harness.AssertAllHit(ids, 1)).To(Succeed(),
 				"traffic must flow to the backend after recreate")

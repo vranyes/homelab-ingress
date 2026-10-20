@@ -335,6 +335,13 @@ provision:
     curl -sfL https://get.k3s.io | sh -s - --disable=traefik --disable=servicelb --flannel-iface=eth0
 
 - mode: system
+  file:
+    url: ./scripts/03-geolite-mock.sh
+- mode: system
+  file:
+    url: ./scripts/04-backend-image.sh
+
+- mode: system
   script: |
     #!/bin/sh
     set -eu

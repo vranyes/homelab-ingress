@@ -37,17 +37,26 @@ at allocated LB IPs, and inspects nftables and log files for assertions.
 
 ## Scenario matrix
 
-| File                             | # LBs | Targets/LB | Asserts                                                                                            |
-|----------------------------------|-------|------------|----------------------------------------------------------------------------------------------------|
-| `zero_lb_test.go`                | 0     | -          | `Health.active_macvlans == 0`; no per-LB nftables chains; controller log clean                     |
-| `one_lb_test.go` (DescribeTable) | 1     | 0          | macvlan created but no Service status IP; no HTTP traffic succeeds                                 |
-|                                  | 1     | 1          | status IP present; 20 GETs all return one backend ID                                               |
-|                                  | 1     | 3          | status IP present; 20 GETs return ≥2 distinct backends within ±25% uniform                         |
-| `two_lb_test.go`                 | 2     | 1 + 3      | distinct LB IPs; per-LB isolation; lb1 hits 1, lb2 hits 3                                          |
-| `two_lb_test.go`                 | 2     | 1 + 1      | same external port (80) on both LBs; no cross-talk between backends                                |
-| `churn_test.go`                  | 1→0   | 1          | macvlan gone; nftables chain gone; Service finalizer removed                                       |
-| `churn_test.go`                  | 0→1   | 1          | recreate within 10s; reconverges within 30s                                                        |
-| `oidc_reject_test.go`            | 1     | 1          | mutated token (aud=bogus) rejected; controller log shows Unauthenticated; no Service status IP set |
+| File                             | # LBs | Targets/LB | Asserts                                                                                                          |
+|----------------------------------|-------|------------|------------------------------------------------------------------------------------------------------------------|
+| `zero_lb_test.go`                | 0     | -          | `Health.active_macvlans == 0`; no per-LB nftables chains; controller log clean                                   |
+| `one_lb_test.go` (DescribeTable) | 1     | 0          | no macvlan provisioned (controller requeues on zero ready endpoints); no status IP; no nftables chains           |
+|                                  | 1     | 1          | status IP present; backend pods Ready; 50 fresh-conn GETs all return one backend ID                              |
+|                                  | 1     | 3          | status IP present; backend pods Ready; 50 fresh-conn GETs return all 3 backends within ±25% uniform              |
+| `two_lb_test.go`                 | 2     | 1 + 3      | distinct LB IPs; per-LB isolation; lb1 hits 1, lb2 hits 3; both per-service nftables chains exist                |
+| `two_lb_test.go`                 | 2     | 1 + 1      | same external port (80) on both LBs; no cross-talk; both per-service nftables chains exist                       |
+| `churn_test.go`                  | 1→0   | 1          | macvlan gone; nftables chain gone; Service finalizer removed                                                     |
+| `churn_test.go`                  | 0→1   | 1          | recreate within 10s; reconverges within 30s                                                                      |
+| `oidc_reject_test.go`            | 1     | 1          | mutated token (aud=bogus) rejected; controller log shows Unauthenticated; no Service status IP set               |
+| `grpc_list_test.go`              | 1     | 1          | `Get` and `List` report the same converged IP; no entry ever contains `"<nil>"`                                  |
+
+Traffic always uses fresh TCP connections (`CollectBackendIDsFreshConn`,
+`DisableKeepAlives`): keep-alive reuses the same connection — and thus the
+same numgen evaluation — across requests, which under-counts distinct
+backends on round-robin rules. Scenarios wait for backend pods to be Ready
+via `WaitForBackendReady` before creating Services so a missing backend
+image fails fast with the pod's waiting reason instead of a 60s status-IP
+timeout.
 
 ## Running the suite
 
@@ -88,11 +97,12 @@ e2e/
     ├── process.go                            Spawn / ManagedProcess lifecycle
     ├── k8s.go                                controller-runtime client + Service/Deployment factories
     ├── backends.go                           DeployBackend / TearDownBackend wrappers
+    ├── backends_wait.go                      WaitForBackendReady (fail fast on ImagePullBackOff)
     ├── oidc.go                               MintToken / WaitForOidc
     ├── token.go                              WriteToken / MutateToken / BadAudienceToken
     ├── ingress.go                            IngressConfig marshalling + WaitForIngress
     ├── controller.go                         WaitForControllerReady / WaitForControllerReconcile
-    ├── traffic.go                            CollectBackendIDs / AssertAllHit / AssertRoughlyUniform
+    ├── traffic.go                            CollectBackendIDsFreshConn (round-robin) / AssertAllHit / AssertRoughlyUniform
     ├── nft.go                                (#linux) LBChains / AssertNoLBChains / AssertLBChainExists
     └── log.go                                TailFile / GrepFile / WaitForLogMatch
 ```
@@ -107,25 +117,34 @@ e2e/
 
 ## Known issues
 
-### Backend Deployment fails with ImagePullBackOff (blocks 7/10 specs)
+### Backend image (fixed by pre-pull + readiness gate)
 
-`DeployIdenticon` (harness/k8s.go) creates a k8s Deployment using the
-`traefik/whoami` public container image. The Lima VM's k3s runs with its own
-embedded containerd that has **no internet access** — it cannot pull from
-Docker Hub. Pods fail with `ImagePullBackOff`.
+`DeployIdenticon` (`harness/k8s.go`) creates a k8s Deployment using the
+`traefik/whoami:latest` public container image. The Lima VM's k3s runs with
+its own embedded containerd; if that image is not cached, pods fail with
+`ImagePullBackOff` and every traffic spec times out in
+`WaitForServiceStatusIP`.
 
-Affected specs:
-- `one_lb_test.go` (1 target, 3 targets)
-- `two_lb_test.go` (both specs)
-- `churn_test.go` (re-create step: 0→1 targets)
+Two mitigations are now in place:
 
-**To fix permanently:** pre-pull the `traefik/whoami` image into k3s's
-containerd, or replace it with a binary-backed backend that doesn't need a
-container registry. See `e2e-vm/RUNBOOK.md` for the debug guide.
+- **Provision-time pre-pull:** `e2e-vm/scripts/04-backend-image.sh` (wired
+  into `e2e-vm/lima.yaml`) pulls the exact `backendImage` reference into
+  k3s containerd with retries, failing fast at provision time instead of
+  per-spec.
+- **Fail-fast readiness gate:** scenarios call
+  `harness.WaitForBackendReady` after `DeployBackend`, so a missing image
+  surfaces immediately with the pod's container waiting reason instead of a
+  60s status-IP timeout.
 
-**`zero_lb`** and **`oidc_reject`** pass — they
-require no k8s backend Deployment. Run them to verify data-plane and
-controller logic while the image issue is outstanding:
+Longer term, replacing `traefik/whoami` with a binary-backed backend that
+needs no registry (the `e2e/cmd/identicon` idea noted in earlier docs)
+would remove the Docker Hub dependency entirely. The traffic parser
+(`harness/traffic.go:parseHostname`) currently expects the
+`traefik/whoami` `Hostname: <pod>` body format, so any replacement must
+keep that contract or update the parser in lockstep.
+
+**Smoke check while iterating:** `zero_lb` and `oidc_reject` require no
+k8s backend Deployment:
 
 ```bash
 # Inside the VM:
@@ -135,15 +154,23 @@ go test -tags=e2e -v -run 'ZeroLB|OidcReject|ControllerRestart' ./...
 
 ### Spec timing
 
-The suite has a 25-minute timeout (`-timeout=25m`). All 10 specs should
-complete in under 5 minutes once the image issue is resolved.
+The suite has a 40-minute timeout (`-timeout=40m`). Per-spec contexts sum to
+~35 minutes worst-case (backend readiness + status IP + traffic windows
+across 11 specs), so a fully green run finishes in minutes while a cascading
+failure still produces a Ginkgo report instead of a `go test` SIGKILL. All
+specs should complete in under 10 minutes on a healthy provision.
 
-## Open issues the suite surfaces
+## RPC consistency the suite pins
 
-The `one_lb_0_targets` entry exercises the part of `ingress/internal/service` where
-`ListLoadBalancers` (service.go:132) might dereference a nil `SourceAddress`.
-The suite pins the corresponding behaviour — if the bug exists it manifests as a
-gRPC `Internal` status on List/Get; if it has been fixed, it manifests as a normal
-response with `assigned_ip == ""`.
-The scenarios are written to tolerate the latter and surface the former as a test
-failure when the nil-deref panic is observed.
+`GetLoadBalancer` and `ListLoadBalancers` must agree: a DHCP-pending LB
+reports `assigned_ip == ""` on both; a converged LB reports the same IP on
+both. This is pinned at two levels:
+
+- Unit: `TestListLoadBalancers_BeforeDHCP` in
+  `ingress/internal/service/service_test.go`. `List` used to return the
+  literal string `"<nil>"` (`net.IP(nil).String()`) for pending LBs, which
+  the controller's IP poller (`controller/internal/controller/ip_poller.go`)
+  then wrote into Service status as a real IP. Fixed by nil-guarding `List`
+  like `Get`.
+- E2E: `grpc_list_test.go` asserts `Get` and `List` report the same
+  converged IP and that no `List` entry ever contains `"<nil>"`.

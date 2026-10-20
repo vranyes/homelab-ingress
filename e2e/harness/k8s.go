@@ -22,7 +22,11 @@ import (
 const (
 	e2eNamespace = "hl-ingress-e2e"
 
-	backendImage = "traefik/whoami"
+	// backendImage must match the reference pre-pulled by
+	// e2e-vm/scripts/04-backend-image.sh. Keep the tag explicit — an
+	// untagged reference silently resolves to :latest at pull time but
+	// reads ambiguously in failure messages (e.g. ImagePullBackOff).
+	backendImage = "traefik/whoami:latest"
 	backendPort  = 8080
 
 	lbClassHomelabIngress = "homelab-ingress"

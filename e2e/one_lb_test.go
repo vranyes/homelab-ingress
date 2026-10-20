@@ -18,23 +18,33 @@ import (
 //
 // For each entry:
 //   - 0 targets: Deploy no backend and create the LB Service. The controller
-//     requeues every 5s without writing status.LoadBalancer.Ingress. The
-//     LB itself (macvlan + dnsmasq lease + nftables chain) is created on the
-//     ingress side, but no DNAT rule exists, so HTTP GETs to the LB IP fail.
-//   - 1 target: A single backend pod; 20 GETs all return the same backend ID.
-//   - 2+ targets: Three backend pods; 20 GETs return ≥2 distinct backend IDs
+//     requeues every 5s without writing status.LoadBalancer.Ingress because
+//     endpointInfoForService finds no ready endpoints, so no
+//     CreateLoadBalancer RPC ever reaches the ingress daemon: no macvlan is
+//     provisioned, no DHCP lease is acquired, no DNAT rule exists, and only
+//     the finalizer is added to the Service (see
+//     controller/internal/controller::(*ServiceReconciler).reconcileUpsert).
+//     Assert all three zero-state invariants.
+//   - 1 target: A single backend pod; 50 fresh-conn GETs all return the same backend ID.
+//   - 2+ targets: Three backend pods; 50 fresh-conn GETs return all 3 backend IDs
 //     distributed roughly uniformly (within ±25%).
+//
+// Traffic always uses fresh TCP connections (DisableKeepAlives): keep-alive
+// reuses the same connection — and thus the same numgen evaluation — across
+// requests, which under-counts distinct backends on round-robin rules.
 var _ = Describe("one-lb matrix", func() {
 	DescribeTable("1 LB, N targets",
 		func(replicas int32, expectedDistinct int) {
 			lbName := fmt.Sprintf("one-lb-%d", replicas)
-			ctx, cancel := contextWithTimeout(120 * time.Second)
+			ctx, cancel := contextWithTimeout(240 * time.Second)
 			DeferCleanup(cancel)
 
 			By(fmt.Sprintf("deploying %d identicon backend(s) for %s", replicas, lbName))
 			if replicas > 0 {
 				Expect(harness.DeployBackend(ctx, sharedK8s(), e2eNamespace, lbName, replicas)).To(Succeed())
 				DeferCleanup(harness.TearDownBackend, ctx, sharedK8s(), e2eNamespace, lbName)
+				By("waiting for backend pods to be Ready (fails fast on ImagePullBackOff)")
+				Expect(harness.WaitForBackendReady(ctx, sharedK8s(), e2eNamespace, lbName, 90*time.Second)).To(Succeed())
 			} else {
 				Eventually(harness.EnsureNamespace).
 					WithTimeout(5*time.Second).
@@ -50,12 +60,11 @@ var _ = Describe("one-lb matrix", func() {
 			Expect(harness.WaitForServiceFinalizer(ctx, sharedK8s(), e2eNamespace, lbName, 30*time.Second)).To(Succeed())
 
 			if replicas == 0 {
-				// With no backends the controller requeues indefinitely without
-				// creating the LB on the router. The ingress daemon never
-				// provisions a macvlan interface (since it sees no
-				// CreateLoadBalancer RPC), no DHCP lease is acquired, no
-				// status.LoadBalancer.Ingress is written, and only the
-				// finalizer is added to the Service (see
+				// With no ready endpoints the controller requeues indefinitely
+				// without ever calling CreateLoadBalancer on the router, so
+				// the ingress daemon never provisions a macvlan interface,
+				// no DHCP lease is acquired, no status IP is written, and
+				// only the finalizer is added to the Service (see
 				// controller/internal/controller::(*ServiceReconciler).reconcileUpsert).
 				// Assert all three zero-state invariants.
 				By("asserting no service status IP, no nftables chains, and zero macvlans when there are no backends")
@@ -78,11 +87,11 @@ var _ = Describe("one-lb matrix", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(lbIP).NotTo(BeEmpty())
 
-			By(fmt.Sprintf("firing 20 HTTP GETs against %s:80 expecting %d distinct backends", lbIP, expectedDistinct))
+			By(fmt.Sprintf("firing 50 HTTP GETs (fresh connections) against %s:80 expecting %d distinct backends", lbIP, expectedDistinct))
 			Eventually(func(g Gomega) {
-				ids, err := harness.CollectBackendIDs(ctx, lbIP+":80", 20, 30*time.Second)
+				ids, err := harness.CollectBackendIDsFreshConn(ctx, lbIP+":80", 50, 60*time.Second)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(ids).To(HaveLen(20), "expected all 20 requests to hit a backend")
+				g.Expect(ids).To(HaveLen(50), "expected all 50 requests to hit a backend")
 				g.Expect(harness.AssertAllHit(ids, expectedDistinct)).To(Succeed(),
 					"distinct backend count != expected")
 				if expectedDistinct >= 2 {
@@ -98,17 +107,24 @@ var _ = Describe("one-lb matrix", func() {
 })
 
 // consistentlyNoStatusIP asserts the LoadBalancer Service never gets a status
-// IP within the supplied window.
+// IP within the supplied window. Cancellation via ctx aborts the poll so a
+// suite timeout does not sit out the full window.
 func consistentlyNoStatusIP(ctx context.Context, ns, name string, window time.Duration) {
-	_ = ctx // currently unused; kept for API symmetry with other helpers
-	// We poll manually rather than using Eventually/Consistently so the failure
-	// message points at the exact moment the IP appeared if it does.
 	deadline := time.Now().Add(window)
 	for deadline.After(time.Now()) {
-		svc, err := harness.GetService(context.Background(), sharedK8s(), ns, name)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		svc, err := harness.GetService(ctx, sharedK8s(), ns, name)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(harness.ServiceStatusIP(svc)).To(BeEmpty(),
 			"Service %s/%s should not have a status IP with 0 endpoints", ns, name)
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 }

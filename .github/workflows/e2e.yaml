@@ -8,6 +8,9 @@ on:
       - 'proto/**'
       - 'e2e/**'
       - 'e2e-vm/**'
+      - 'files/**'
+      - 'nfpm/**'
+      - 'controller/deploy/**'
       - 'Makefile'
       - '.github/workflows/e2e.yaml'
   push:
@@ -21,12 +24,15 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      - name: Vet e2e module (fast fail on compile errors)
+        run: |
+          cd e2e && GOOS=linux go vet -tags=e2e ./...
       - name: Install lima
         run: |
           curl -fsSL https://github.com/lima-vm/lima/releases/download/v0.23.2/lima-0.23.2-Linux-x86_64.tar.gz \

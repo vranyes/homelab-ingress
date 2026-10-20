@@ -34,9 +34,9 @@ else
 endif
 
 .PHONY: help test test-unit \
-        start-e2e-vm remove-e2e-vm \
+        start-e2e-vm remove-e2e-vm ensure-e2e-vm copy-e2e-vm \
         build-e2e-binaries clean-e2e-binaries \
-        test-e2e test-e2e-down
+        test-e2e test-e2e-down test-e2e-bringup test-e2e-shell
 
 # E2E binaries (built on host for Lima VM)
 $(BIN_DIR)/ingress: $(shell find ingress/cmd/ingress -name '*.go') \
@@ -104,7 +104,17 @@ remove-e2e-vm: ## Stop and delete the running VM instance
 # E2E test targets
 # ------------------------------------------------------------------
 
-test-e2e: build-e2e-binaries ## Boot clean VM, copy pre-built binaries, run e2e tests
+.PHONY: ensure-e2e-vm copy-e2e-vm test-e2e-bringup test-e2e-shell
+
+ensure-e2e-vm: ## Start the e2e VM if it is not already running
+	@if ! limactl list 2>/dev/null | grep -q "^$(LIMA_VM)[[:space:]].*Running"; then \
+		echo "==> e2e VM not running, starting it"; \
+		$(MAKE) start-e2e-vm; \
+	else \
+		echo "==> e2e VM already running"; \
+	fi
+
+copy-e2e-vm: build-e2e-binaries ## Stage e2e/controller sources + pre-built binaries into the VM
 	@echo "==> Copying e2e and controller directories into VM"
 	limactl shell $(LIMA_VM) -- sudo mkdir -p /root/homelab-ingress/e2e /root/homelab-ingress/controller
 	tar czf - --no-xattrs -C $(ROOT)/e2e . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/e2e/
@@ -115,6 +125,16 @@ test-e2e: build-e2e-binaries ## Boot clean VM, copy pre-built binaries, run e2e 
 	limactl shell $(LIMA_VM) -- sudo cp /tmp/ingress /usr/local/bin/
 	limactl shell $(LIMA_VM) -- sudo cp /tmp/controller /usr/local/bin/
 	limactl shell $(LIMA_VM) -- sudo cp /tmp/oidc-mock /usr/local/bin/
+
+test-e2e-bringup: ensure-e2e-vm copy-e2e-vm ## Boot VM and stage sources+binaries without running tests
+
+test-e2e-shell: test-e2e-bringup ## Stage everything and drop into an interactive root shell in the VM
+	@echo "==> Opening interactive shell (k3s at /etc/rancher/k3s/k3s.yaml, logs in /var/log/hl-ingress/)"
+	limactl shell $(LIMA_VM) -- sudo sh -c 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; exec bash -l || exec sh -l'
+
+test-e2e-down: remove-e2e-vm ## Alias for remove-e2e-vm
+
+test-e2e: ensure-e2e-vm copy-e2e-vm ## Boot VM (if needed), copy pre-built binaries, run e2e tests
 	@echo "==> Running e2e tests inside the VM"
 	limactl shell $(LIMA_VM) -- sudo sh -c ' \
 		set -e; \
@@ -122,7 +142,7 @@ test-e2e: build-e2e-binaries ## Boot clean VM, copy pre-built binaries, run e2e 
 		echo "==> Waiting for k3s node to be Ready"; \
 		kubectl wait --for=condition=Ready node --all --timeout=60s; \
 		echo "==> Running e2e tests"; \
-		cd /root/homelab-ingress/e2e && go test -tags=e2e -timeout=25m -v ./...'
+		cd /root/homelab-ingress/e2e && go test -tags=e2e -timeout=40m -v ./...'
 	@echo "==> Stopping VM (best effort)"
 	@if [ -z "$(E2E_KEEP_VM)" ]; then \
 		$(MAKE) remove-e2e-vm; \

@@ -30,6 +30,13 @@ var _ = Describe("oidc rejection", func() {
 		// scenario must NOT leak the bad token to subsequent scenarios.
 		good, err := harness.ReadFile(tokenPath)
 		Expect(err).NotTo(HaveOccurred())
+
+		// Register the Service delete FIRST so DeferCleanup's LIFO order
+		// restores the good token BEFORE deleting: the delete reconcile
+		// then succeeds with a valid token and the finalizer is removed
+		// immediately, instead of relying on the controller's error
+		// backoff to retry after the restore.
+		DeferCleanup(harness.DeleteService, ctx, sharedK8s(), e2eNamespace, "oidc-reject")
 		DeferCleanup(harness.MutateToken, tokenPath, string(good))
 
 		By("minting a token with aud=bogus and writing it to " + tokenPath)
@@ -44,7 +51,6 @@ var _ = Describe("oidc rejection", func() {
 			WithArguments(ctx, sharedK8s(), e2eNamespace).
 			Should(Succeed())
 		Expect(harness.CreateLBService(ctx, sharedK8s(), e2eNamespace, lbName, 80, 8080)).To(Succeed())
-		DeferCleanup(harness.DeleteService, sharedK8s(), e2eNamespace, lbName)
 
 		// Unauthenticated is not in IsRetryable, so the controller logs an
 		// error containing "get from router" or "create on router" with the
