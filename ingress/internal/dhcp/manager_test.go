@@ -110,17 +110,28 @@ func (f *fakeClient) counts() (started, stopped int) {
 	return f.started, f.stopped
 }
 
-// withFakeClient swaps the constructor seam to always return fake.
-func withFakeClient(t *testing.T, fake *fakeClient) {
+// setClientCtor swaps the constructor seam for the duration of the test.
+// The lock is released immediately: holding it across the test body would
+// deadlock a test that installs a second constructor mid-test (and nothing
+// runs in parallel in this package).
+func setClientCtor(t *testing.T, ctor func(string, net.HardwareAddr, *LeaseInfo, IPChangeFunc, *slog.Logger) Client) {
 	t.Helper()
 	seamMu.Lock()
 	old := newRealClientFn
-	newRealClientFn = func(string, net.HardwareAddr, *LeaseInfo, IPChangeFunc, *slog.Logger) Client {
-		return fake
-	}
+	newRealClientFn = ctor
+	seamMu.Unlock()
 	t.Cleanup(func() {
+		seamMu.Lock()
 		newRealClientFn = old
 		seamMu.Unlock()
+	})
+}
+
+// withFakeClient swaps the constructor seam to always return fake.
+func withFakeClient(t *testing.T, fake *fakeClient) {
+	t.Helper()
+	setClientCtor(t, func(string, net.HardwareAddr, *LeaseInfo, IPChangeFunc, *slog.Logger) Client {
+		return fake
 	})
 }
 
@@ -171,26 +182,39 @@ func TestManagerOnIPChangeWritesStateAddress(t *testing.T) {
 // (plus the acquired flag) changes — never the desired backend set.
 func TestManagerOnIPChangeLeavesTargetsUntouched(t *testing.T) {
 	m, st := newTestManager(t)
-	svc := seedService(t, st, "ns/svc", "eth0", "02:00:00:00:00:01")
-	before := svc.Targets
-	m.setServiceMapping(svc.ServiceName, "eth0")
-
+	// Subscribe before seeding: notifications are delivered to subscribers
+	// that exist at notify time, so a subscription created afterwards would
+	// never see the create event (and the drain below would block forever).
 	ch := st.Subscribe()
 	defer st.Unsubscribe(ch)
-	// Drain the create notification from seeding.
-	<-ch
+	svc := seedService(t, st, "ns/svc", "eth0", "02:00:00:00:00:01")
+	m.setServiceMapping(svc.ServiceName, "eth0")
+	// Compare against the cloned shape delivered by notifications: cloning
+	// turns a nil Dst slice into an empty one, so the locally built value
+	// would report a spurious difference.
+	create := <-ch
+	before := create.Service.Targets
 
 	sameIP := net.ParseIP("10.44.0.55").To4()
 	sameMask := net.CIDRMask(24, 32)
 	m.onIPChange("eth0", sameIP, sameMask) // first: applies
 	<-ch
 
-	// Second identical change must not re-notify (no UpdateService call).
+	// A second identical change (the shape of a lease renewal) must not
+	// re-notify: nothing observable changed.
 	m.onIPChange("eth0", sameIP, sameMask)
 	select {
 	case n := <-ch:
 		t.Fatalf("unexpected notification for identical IP/mask: %+v", n)
 	case <-time.After(200 * time.Millisecond):
+	}
+
+	// A mask-only change must notify (the IP is unchanged).
+	m.onIPChange("eth0", sameIP, net.CIDRMask(16, 32))
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("mask-only change must notify")
 	}
 
 	got, _ := st.GetService("ns/svc")
@@ -199,20 +223,24 @@ func TestManagerOnIPChangeLeavesTargetsUntouched(t *testing.T) {
 	}
 }
 
-// TestManagerEnsureAndStartDoubleStartIdempotent pins that repeated upserts
-// for the same interface reuse the client instead of leaking Start calls.
-func TestManagerEnsureAndStartDoubleStartIdempotent(t *testing.T) {
+// TestManagerUpsertReusesClient pins that repeated upserts for the same
+// interface reuse one client instead of constructing (and leaking) another.
+// Start itself is idempotent on the real client, so a second call is allowed.
+func TestManagerUpsertReusesClient(t *testing.T) {
 	m, st := newTestManager(t)
 	fake := &fakeClient{}
-	withFakeClient(t, fake)
+	ctorCalls := 0
+	setClientCtor(t, func(string, net.HardwareAddr, *LeaseInfo, IPChangeFunc, *slog.Logger) Client {
+		ctorCalls++
+		return fake
+	})
 	svc := seedService(t, st, "ns/svc", "eth0", "02:00:00:00:00:01")
 
 	m.handleUpsert("eth0", svc)
 	m.handleUpsert("eth0", svc)
 
-	started, _ := fake.counts()
-	if started != 1 {
-		t.Fatalf("expected exactly 1 Start, got %d", started)
+	if ctorCalls != 1 {
+		t.Fatalf("expected one DHCP client for repeated upserts, got %d", ctorCalls)
 	}
 	if m.serviceKeyToIface("ns/svc") != "eth0" {
 		t.Fatalf("mapping must resolve to eth0")
@@ -236,11 +264,9 @@ func TestManagerRenameRemovesOldClient(t *testing.T) {
 	m.handleUpsert("eth0", svc)
 
 	newFake := &fakeClient{}
-	seamMu.Lock()
-	newRealClientFn = func(string, net.HardwareAddr, *LeaseInfo, IPChangeFunc, *slog.Logger) Client {
+	setClientCtor(t, func(string, net.HardwareAddr, *LeaseInfo, IPChangeFunc, *slog.Logger) Client {
 		return newFake
-	}
-	seamMu.Unlock()
+	})
 
 	renamed := svc
 	renamed.SetInterfaceName("eth1")

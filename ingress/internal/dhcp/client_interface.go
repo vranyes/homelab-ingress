@@ -111,7 +111,7 @@ func (m *Manager) onIPChange(iface string, ip net.IP, mask net.IPMask) {
 	}
 
 	ipChanged := !svc.SourceAddress.Equal(ip)
-	maskChanged := maskEqual(svc.SourceMask, mask)
+	maskChanged := !maskEqual(svc.SourceMask, mask)
 
 	if ipChanged || maskChanged {
 		clone := svc.Clone()
