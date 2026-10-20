@@ -125,7 +125,7 @@ limactl copy e2e-vm/config.yaml                           hl-ingress-e2e:/etc/ho
 # 4. (Token minting and service startup happen inside the test suite, not here.)
 
 # 5. Run the suite.
-limactl shell hl-ingress-e2e -- go test ./e2e/...
+limactl shell hl-ingress-e2e -- go test ./e2e/... -count=1
 
 # 6. Tail logs if something fails.
 limactl shell hl-ingress-e2e -- tail -n200 /var/log/hl-ingress/*.log

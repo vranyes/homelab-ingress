@@ -35,6 +35,19 @@ const (
 	audience      = "homelab-ingress"
 )
 
+// vepaClientNS is the VEPA peer network namespace. Scenario traffic is sent
+// from inside it so packets arrive over the bridge and traverse the ingress
+// daemon's prerouting (DNAT) chains. Traffic originating in the host namespace
+// is delivered locally and DNATed by kube-proxy in the OUTPUT chain, which
+// means it never exercises the product's rules at all.
+const vepaClientNS = "ns-server"
+
+// collectIDs sends fresh-connection HTTP requests from the VEPA peer and
+// returns the backend hostname seen by each response.
+func collectIDs(ctx context.Context, addr string, n int, timeout time.Duration) ([]string, error) {
+	return harness.CollectBackendIDsFromNS(ctx, vepaClientNS, addr, n, timeout)
+}
+
 // sharedContext is populated in BeforeSuite and torn down in AfterSuite.
 // Scenarios read it via shared() rather than capturing the values in
 // closure variables — that makes test ordering independent and avoids
@@ -72,11 +85,21 @@ var _ = BeforeSuite(func() {
 	_, err := harness.RunShell(ctx, "mkdir -p /var/log/hl-ingress /var/run/hl-ingress /var/lib/homelab-ingress /etc/homelab-ingress")
 	Expect(err).NotTo(HaveOccurred())
 
+	By("truncating service logs from any previous run")
+	// Spawn opens logs with O_APPEND and assertions such as the zero-LB
+	// baseline count ERROR lines in the whole file. Stale lines from an
+	// earlier run (or a previous crashed controller) must not leak into this
+	// one; `: >` also creates the file when it does not exist yet.
+	_, err = harness.RunShell(ctx, "for f in ingress controller oidc; do : > /var/log/hl-ingress/$f.log; done")
+	Expect(err).NotTo(HaveOccurred())
+
 	By("creating shared e2e namespace " + e2eNamespace)
 	cl, err := harness.NewClient()
 	Expect(err).NotTo(HaveOccurred(), "k8s client")
 	shared.k8s = cl
-	Eventually(harness.EnsureNamespace).WithArguments(ctx, cl, e2eNamespace).WithTimeout(5 * time.Second).Should(Succeed())
+	// On a kept VM the previous run may still be finalizing this namespace;
+	// give deletion time to finish instead of failing on the first check.
+	Eventually(harness.EnsureNamespace).WithArguments(ctx, cl, e2eNamespace).WithTimeout(60 * time.Second).Should(Succeed())
 
 	By("spawning oidc-mock")
 	shared.oidcProc, err = harness.Spawn(
@@ -111,14 +134,27 @@ var _ = BeforeSuite(func() {
 			"--router-addr", ingressAddr,
 			"--token-path", tokenPath,
 			"--ca-path", caPEMPath,
-			"--metrics-addr", ":8081",
+			// Metrics must not collide with the controller's hardcoded
+			// health-probe port (:8081) nor with oidc-mock (:8080). A
+			// collision kills the manager right after it logs "starting
+			// manager", so keep these three distinct.
+			"--metrics-addr", ":18080",
 			"--poll-interval", "5s",
 		},
 		[]string{"KUBECONFIG=/etc/rancher/k3s/k3s.yaml"},
 		"/var/log/hl-ingress/controller.log",
 	)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(harness.WaitForControllerReady(ctx, controllerLog, 60*time.Second)).To(Succeed())
+	Expect(harness.WaitForControllerReady(ctx, shared.controllerProc, controllerLog, 60*time.Second)).To(Succeed())
+
+	// Checked here rather than in the zero-LB spec: specs run in randomized
+	// order and later specs legitimately produce controller ERROR lines, so a
+	// whole-file check there would be order-dependent. At this point only
+	// startup has happened, which is exactly the clean baseline.
+	By("asserting the controller started without ERROR log lines")
+	errCount, err := harness.GrepCountFile(controllerLog, "ERROR")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(errCount).To(BeZero(), "controller logged ERROR lines during startup; see "+controllerLog)
 
 	By("building router gRPC client shared across scenarios")
 	rClient, conn, err := harness.NewRouterClient(ingressAddr, tokenPath, caPEMPath)
@@ -128,7 +164,24 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	// Delete the namespace while the controller is still running: the
+	// controller owns the Service finalizer (homelab-ingress.vranyes.com/
+	// cleanup). If it were stopped first, any Service still carrying the
+	// finalizer could never be finalized and the namespace would stay
+	// Terminating forever — which also breaks the next run on a kept VM.
+	if shared.k8s != nil {
+		By("deleting shared namespace " + e2eNamespace + " and waiting for finalizers")
+		if err := harness.DeleteNamespaceIfExists(ctx, shared.k8s, e2eNamespace); err != nil {
+			GinkgoWriter.Printf("warning: delete namespace: %v\n", err)
+		}
+		if err := harness.WaitForNamespaceGone(ctx, shared.k8s, e2eNamespace, 2*time.Minute); err != nil {
+			GinkgoWriter.Printf("warning: namespace cleanup incomplete: %v\n", err)
+		}
+	}
+
 	By("stopping controller, ingress, oidc in reverse order (best effort)")
 	if shared.controllerProc != nil {
 		_ = shared.controllerProc.Terminate(5 * time.Second)
@@ -141,10 +194,6 @@ var _ = AfterSuite(func() {
 	}
 	if shared.routerConn != nil {
 		_ = shared.routerConn.Close()
-	}
-	if shared.k8s != nil {
-		By("deleting shared namespace " + e2eNamespace + " (best effort)")
-		_ = harness.DeleteNamespaceIfExists(ctx, shared.k8s, e2eNamespace)
 	}
 })
 

@@ -1,4 +1,5 @@
 .e2e-vm/
+.e2e-logs/
 .lima/
 .gograph/
 bin/

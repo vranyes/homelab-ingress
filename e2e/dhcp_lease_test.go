@@ -52,7 +52,7 @@ var _ = Describe("dhcp black-box", func() {
 
 		By("verifying traffic flows to the acquired IP (fresh connections)")
 		Eventually(func(g Gomega) {
-			ids, err := harness.CollectBackendIDsFreshConn(ctx, lbIP+":80", 20, 30*time.Second)
+			ids, err := collectIDs(ctx, lbIP+":80", 20, 30*time.Second)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(ids).To(HaveLen(20), "expected all 20 requests to hit a backend")
 			g.Expect(harness.AssertAllHit(ids, 1)).To(Succeed())

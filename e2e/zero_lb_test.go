@@ -23,9 +23,8 @@ var _ = Describe("zero-lb baseline", func() {
 		}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
 
 		Expect(harness.AssertNoLBChains()).To(Succeed())
-
-		errCount, err := harness.GrepCountFile(controllerLog, "ERROR")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(errCount).To(BeZero(), "expected no ERROR log lines in a clean zero-LB baseline")
+		// The "no ERROR lines at startup" assertion lives in BeforeSuite: it
+		// must run before any spec can produce controller errors, and this spec
+		// runs in randomized order.
 	})
 })

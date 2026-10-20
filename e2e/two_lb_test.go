@@ -46,14 +46,14 @@ var _ = Describe("two-lb matrix", func() {
 		Expect(ip1).NotTo(Equal(ip2), "the two LBs must have distinct IPs")
 
 		By("verifying lb1 routes to exactly one backend (fresh connections)")
-		ids1, err := harness.CollectBackendIDsFreshConn(ctx, ip1+":80", 50, 60*time.Second)
+		ids1, err := collectIDs(ctx, ip1+":80", 50, 60*time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ids1).To(HaveLen(50), "expected all 50 requests to hit a backend")
 		Expect(harness.AssertAllHit(ids1, 1)).To(Succeed(),
 			"lb1 should hit only its single backend")
 
 		By("verifying lb2 round-robins across 3 backends (fresh connections)")
-		ids2, err := harness.CollectBackendIDsFreshConn(ctx, ip2+":80", 50, 60*time.Second)
+		ids2, err := collectIDs(ctx, ip2+":80", 50, 60*time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ids2).To(HaveLen(50), "expected all 50 requests to hit a backend")
 		Expect(harness.AssertAllHit(ids2, 3)).To(Succeed(),
@@ -105,13 +105,13 @@ var _ = Describe("two-lb matrix", func() {
 		Expect(ip1).NotTo(Equal(ip2), "LBs must have distinct IPs even on shared external port")
 
 		By("hitting lb1 50 times (fresh connections) — should see only lb1's backend")
-		ids1, err := harness.CollectBackendIDsFreshConn(ctx, ip1+":80", 50, 60*time.Second)
+		ids1, err := collectIDs(ctx, ip1+":80", 50, 60*time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ids1).To(HaveLen(50), "expected all 50 requests to hit a backend")
 		Expect(harness.AssertAllHit(ids1, 1)).To(Succeed(), "lb1 should hit only its own backend")
 
 		By("hitting lb2 50 times (fresh connections) — should see only lb2's backend")
-		ids2, err := harness.CollectBackendIDsFreshConn(ctx, ip2+":80", 50, 60*time.Second)
+		ids2, err := collectIDs(ctx, ip2+":80", 50, 60*time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ids2).To(HaveLen(50), "expected all 50 requests to hit a backend")
 		Expect(harness.AssertAllHit(ids2, 1)).To(Succeed(), "lb2 should hit only its own backend")

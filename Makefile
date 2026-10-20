@@ -154,7 +154,7 @@ test-e2e: ensure-e2e-vm copy-e2e-vm ## Boot VM (if needed), copy pre-built binar
 		echo "==> Waiting for k3s node to be Ready"; \
 		kubectl wait --for=condition=Ready node --all --timeout=60s; \
 		echo "==> Running e2e tests"; \
-		cd /root/homelab-ingress/e2e && go test -tags=e2e -timeout=40m -v ./...'
+		cd /root/homelab-ingress/e2e && go test -tags=e2e -count=1 -timeout=40m -v ./...'
 	@echo "==> Stopping VM (best effort)"
 	@if [ -z "$(E2E_KEEP_VM)" ]; then \
 		$(MAKE) remove-e2e-vm; \

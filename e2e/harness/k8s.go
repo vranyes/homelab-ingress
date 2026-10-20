@@ -86,6 +86,31 @@ func DeleteNamespaceIfExists(ctx context.Context, cl client.Client, name string)
 	return nil
 }
 
+// WaitForNamespaceGone polls until the named namespace is fully gone.
+//
+// Namespace deletion only completes after every object's finalizers are
+// removed. Callers that delete a namespace owning Service finalizers must keep
+// the finalizer controller (the ingress controller) alive until this returns.
+func WaitForNamespaceGone(ctx context.Context, cl client.Client, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ns := &corev1.Namespace{}
+		err := cl.Get(ctx, types.NamespacedName{Name: name}, ns)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("get namespace: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("timeout waiting for namespace %s to be deleted", name)
+}
+
 // DeployIdenticon creates a Deployment of backend pods (traefik/whoami).
 // name is used as the deployment name and pod labels. The caller is
 // responsible for creating the LoadBalancer Service separately (see

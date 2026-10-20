@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -66,6 +67,12 @@ func parseHostname(body []byte) string {
 // request to use a fresh TCP connection (DisableKeepAlives: true). This is
 // critical for testing round-robin numgen rules because keep-alive reuses the
 // same connection — and thus the same numgen evaluation — across requests.
+//
+// Unlike CollectBackendIDs it does not silently drop failures: a request that
+// cannot connect, or that answers without a "Hostname:" line, is reported as
+// an error carrying the first cause. Callers that expect traffic to flow must
+// not see an empty slice with a nil error — that hides the difference between
+// "the LB is unreachable" and "the LB answered from the wrong place".
 func CollectBackendIDsFreshConn(ctx context.Context, lbAddr string, n int, timeout time.Duration) ([]string, error) {
 	url := "http://" + lbAddr + "/"
 	transport := &http.Transport{DisableKeepAlives: true}
@@ -74,10 +81,19 @@ func CollectBackendIDsFreshConn(ctx context.Context, lbAddr string, n int, timeo
 		Transport: transport,
 	}
 	ids := make([]string, 0, n)
+	var firstErr error
+	failures := 0
+	fail := func(format string, args ...any) {
+		failures++
+		if firstErr == nil {
+			firstErr = fmt.Errorf(format, args...)
+		}
+	}
 	deadline := time.Now().Add(timeout)
 	for i := 0; i < n; i++ {
 		if time.Now().After(deadline) {
-			return ids, fmt.Errorf("collecting backend ids timed out after %s, collected %d/%d", timeout, len(ids), n)
+			return ids, fmt.Errorf("collecting backend ids from %s timed out after %s: collected %d/%d; first error: %v",
+				url, timeout, len(ids), n, firstErr)
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -85,18 +101,115 @@ func CollectBackendIDsFreshConn(ctx context.Context, lbAddr string, n int, timeo
 		}
 		resp, err := client.Do(req)
 		if err != nil {
+			fail("request %d: %w", i+1, err)
 			continue
 		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
+			fail("request %d: read body: %w", i+1, err)
 			continue
 		}
-		if id := parseHostname(body); id != "" {
-			ids = append(ids, id)
+		id := parseHostname(body)
+		if id == "" {
+			fail("request %d: HTTP %d from %s without a Hostname line (body: %s)",
+				i+1, resp.StatusCode, url, bodySnippet(body))
+			continue
 		}
+		ids = append(ids, id)
+	}
+	if failures > 0 {
+		return ids, fmt.Errorf("%d/%d requests to %s failed; first error: %w", failures, n, url, firstErr)
 	}
 	return ids, nil
+}
+
+// statusMarker separates the response body from curl's exit status in the
+// output of CollectBackendIDsFromNS.
+const statusMarker = "\n__HL_HTTP_STATUS__"
+
+// curlInNS runs curl inside a network namespace. It is a variable so tests can
+// substitute a fake without requiring ip/netns or root.
+var curlInNS = func(ctx context.Context, ns string, args ...string) ([]byte, error) {
+	full := append([]string{"netns", "exec", ns, "curl"}, args...)
+	cmd := exec.CommandContext(ctx, "ip", full...)
+	return cmd.CombinedOutput()
+}
+
+// CollectBackendIDsFromNS is like CollectBackendIDsFreshConn, but sends every
+// request from inside the given network namespace.
+//
+// This distinction is essential in the e2e VM: the LB IPs sit on macvlan
+// interfaces in the host namespace, so a request made by the test process
+// itself is delivered locally and its DNAT is performed by kube-proxy in the
+// OUTPUT chain. Such traffic never reaches the ingress daemon's prerouting
+// rules, so assertions built on it pass even when the daemon's DNAT is broken.
+// Requests issued from the VEPA peer namespace arrive over the bridge and do
+// traverse those chains.
+func CollectBackendIDsFromNS(ctx context.Context, ns, lbAddr string, n int, timeout time.Duration) ([]string, error) {
+	url := "http://" + lbAddr + "/"
+	ids := make([]string, 0, n)
+	var firstErr error
+	failures := 0
+	fail := func(format string, args ...any) {
+		failures++
+		if firstErr == nil {
+			firstErr = fmt.Errorf(format, args...)
+		}
+	}
+	deadline := time.Now().Add(timeout)
+	for i := 0; i < n; i++ {
+		if time.Now().After(deadline) {
+			return ids, fmt.Errorf("collecting backend ids from %s (ns %s) timed out after %s: collected %d/%d; first error: %v",
+				url, ns, timeout, len(ids), n, firstErr)
+		}
+		out, err := curlInNS(ctx, ns, "-sS", "-m", "5", "-w", statusMarker+"%{http_code}", url)
+		if err != nil {
+			fail("request %d: %w: %s", i+1, err, bodySnippet(out))
+			continue
+		}
+		body, status := splitCurlStatus(out)
+		if status != "200" {
+			fail("request %d: HTTP %s from %s (body: %s)", i+1, status, url, bodySnippet(body))
+			continue
+		}
+		id := parseHostname(body)
+		if id == "" {
+			fail("request %d: HTTP %s from %s without a Hostname line (body: %s)",
+				i+1, status, url, bodySnippet(body))
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if failures > 0 {
+		return ids, fmt.Errorf("%d/%d requests to %s (ns %s) failed; first error: %w", failures, n, url, ns, firstErr)
+	}
+	return ids, nil
+}
+
+// splitCurlStatus splits curl's -w output into the response body and the HTTP
+// status code.
+func splitCurlStatus(out []byte) (body []byte, status string) {
+	idx := strings.LastIndex(string(out), strings.TrimSpace(statusMarker))
+	if idx < 0 {
+		return out, "unknown"
+	}
+	statusStart := idx + len(strings.TrimSpace(statusMarker))
+	return out[:idx], strings.TrimSpace(string(out[statusStart:]))
+}
+
+// bodySnippet trims a response body to a short single-line form for error
+// messages.
+func bodySnippet(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	if s == "" {
+		return "<empty>"
+	}
+	return s
 }
 
 // DistinctIDs returns the sorted set of unique strings in `ids`.

@@ -89,7 +89,7 @@ var _ = Describe("one-lb matrix", func() {
 
 			By(fmt.Sprintf("firing 50 HTTP GETs (fresh connections) against %s:80 expecting %d distinct backends", lbIP, expectedDistinct))
 			Eventually(func(g Gomega) {
-				ids, err := harness.CollectBackendIDsFreshConn(ctx, lbIP+":80", 50, 60*time.Second)
+				ids, err := collectIDs(ctx, lbIP+":80", 50, 60*time.Second)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(ids).To(HaveLen(50), "expected all 50 requests to hit a backend")
 				g.Expect(harness.AssertAllHit(ids, expectedDistinct)).To(Succeed(),

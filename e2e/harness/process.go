@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -12,7 +13,11 @@ import (
 // harness. Processes are started with Spawn and stopped with Terminate.
 type ManagedProcess struct {
 	Cmd  *exec.Cmd
-	done chan error
+	done chan error // buffered exit notification consumed by Terminate
+
+	exited  chan struct{} // closed as soon as Wait returns
+	mu      sync.Mutex
+	exitErr error
 }
 
 // Spawn starts a binary at path with the given args and environment
@@ -38,9 +43,48 @@ func Spawn(path string, args []string, env []string, logPath string) (*ManagedPr
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	exited := make(chan struct{})
+	p := &ManagedProcess{Cmd: cmd, done: done, exited: exited}
+	go func() {
+		err := cmd.Wait()
+		p.mu.Lock()
+		p.exitErr = err
+		p.mu.Unlock()
+		close(exited)
+		done <- err
+	}()
 
-	return &ManagedProcess{Cmd: cmd, done: done}, nil
+	return p, nil
+}
+
+// Alive reports whether the process is still running. It never blocks.
+func (p *ManagedProcess) Alive() bool {
+	if p == nil {
+		return false
+	}
+	select {
+	case <-p.exited:
+		return false
+	default:
+		return true
+	}
+}
+
+// ExitErr returns the process exit error and true once the process has
+// exited. Before that it returns nil, false. The error is nil when the
+// process exited successfully.
+func (p *ManagedProcess) ExitErr() (error, bool) {
+	if p == nil {
+		return nil, false
+	}
+	select {
+	case <-p.exited:
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.exitErr, true
+	default:
+		return nil, false
+	}
 }
 
 // Terminate sends SIGTERM and waits up to timeout for the process to exit.

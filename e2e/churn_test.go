@@ -37,7 +37,7 @@ var _ = Describe("churn — delete then recreate", func() {
 		Expect(ip).NotTo(BeEmpty())
 
 		By("verifying traffic flows before delete (fresh connections)")
-		ids, err := harness.CollectBackendIDsFreshConn(ctx, ip+":80", 10, 15*time.Second)
+		ids, err := collectIDs(ctx, ip+":80", 10, 15*time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(harness.AssertAllHit(ids, 1)).To(Succeed())
 
@@ -94,7 +94,7 @@ var _ = Describe("churn — delete then recreate", func() {
 		// same address inside its lease window) but the test only requires
 		// *some* reachable IP. We assert traffic flows regardless.
 		Eventually(func(g Gomega) {
-			ids, err := harness.CollectBackendIDsFreshConn(ctx, ip2+":80", 10, 15*time.Second)
+			ids, err := collectIDs(ctx, ip2+":80", 10, 15*time.Second)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(harness.AssertAllHit(ids, 1)).To(Succeed(),
 				"traffic must flow to the backend after recreate")

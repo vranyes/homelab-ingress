@@ -15,7 +15,7 @@ To re-run the suite (or a subset) by hand without rebooting the VM:
 E2E_KEEP_VM=1 make test-e2e   # host: leaves the VM running afterwards
 # inside the VM:
 cd /root/homelab-ingress/e2e
-go test -tags=e2e -v -run 'TwoLB|Masq' ./...
+go test -tags=e2e -count=1 -v -run 'TwoLB|Masq' ./...
 ```
 
 ## Unit tests inside the VM (linux-only packages)
@@ -69,6 +69,22 @@ A stale `assigned_ip: "<nil>"` (pre-fix List bug) or a mid-convergence IP.
 `kubectl -n hl-ingress-e2e get svc <name> -o jsonpath='{.status}'` — if the
 IP looks wrong, wait one poll interval (5s) and re-check; the IP poller
 corrects it once DHCP lands.
+
+If traffic returns `connection refused` while the Service has a valid IP,
+check the transport rather than the IP: requests made from the host
+namespace are DNATed by kube-proxy (OUTPUT chain) and never touch the
+ingress rules. The suite sends traffic from `ns-server` for this reason.
+Reproduce by hand and watch the ingress counter advance:
+
+```bash
+ip netns exec ns-server curl -s http://<lbIP>/
+nft list chain ip homelab_ingress pre_<safe-service-key>
+# the DNAT rule's packet counter must increase
+```
+
+A zero counter alongside a 200 means the packet took a different path
+(kube-proxy); a zero counter with a refused connection means the ingress
+chain was not reached at all. Also confirm `EnsureVepaRelayUp` passed.
 
 ### `EnsureVepaRelayUp` fails in BeforeSuite
 

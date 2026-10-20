@@ -50,10 +50,19 @@ at allocated LB IPs, and inspects nftables and log files for assertions.
 | `oidc_reject_test.go`            | 1     | 1          | mutated token (aud=bogus) rejected; controller log shows Unauthenticated; no Service status IP set               |
 | `grpc_list_test.go`              | 1     | 1          | `Get` and `List` report the same converged IP; no entry ever contains `"<nil>"`                                  |
 
-Traffic always uses fresh TCP connections (`CollectBackendIDsFreshConn`,
-`DisableKeepAlives`): keep-alive reuses the same connection — and thus the
-same numgen evaluation — across requests, which under-counts distinct
-backends on round-robin rules. Scenarios wait for backend pods to be Ready
+Traffic is always generated **inside the `ns-server` VEPA peer namespace**
+(`collectIDs` → `CollectBackendIDsFromNS`), never from the test process's
+own namespace. The LB IPs live on macvlan interfaces in the host namespace,
+so a request made by the test process is delivered locally and DNATed by
+kube-proxy's OUTPUT chain — it never reaches the ingress daemon's prerouting
+rules, and assertions built on it stay green even when those rules are
+broken. Requests from `ns-server` arrive over the bridge and do traverse the
+ingress chains.
+
+Traffic also uses fresh TCP connections (curl is invoked per request, and
+`CollectBackendIDsFreshConn` sets `DisableKeepAlives`): keep-alive reuses the
+same connection — and thus the same numgen evaluation — across requests,
+which under-counts distinct backends on round-robin rules. Scenarios wait for backend pods to be Ready
 via `WaitForBackendReady` before creating Services so a missing backend
 image fails fast with the pod's waiting reason instead of a 60s status-IP
 timeout.
@@ -101,8 +110,8 @@ e2e/
     ├── oidc.go                               MintToken / WaitForOidc
     ├── token.go                              WriteToken / MutateToken / BadAudienceToken
     ├── ingress.go                            IngressConfig marshalling + WaitForIngress
-    ├── controller.go                         WaitForControllerReady / WaitForControllerReconcile
-    ├── traffic.go                            CollectBackendIDsFreshConn (round-robin) / AssertAllHit / AssertRoughlyUniform
+    ├── controller.go                         WaitForControllerReady (log + process liveness)
+    ├── traffic.go                            CollectBackendIDsFromNS (traffic via ns-server) / CollectBackendIDsFreshConn / AssertAllHit / AssertRoughlyUniform
     ├── nft.go                                (#linux) LBChains / AssertNoLBChains / AssertLBChainExists
     └── log.go                                TailFile / GrepFile / WaitForLogMatch
 ```
@@ -149,8 +158,11 @@ k8s backend Deployment:
 ```bash
 # Inside the VM:
 cd /root/homelab-ingress/e2e
-go test -tags=e2e -v -run 'ZeroLB|OidcReject|ControllerRestart' ./...
+go test -tags=e2e -count=1 -v -run 'ZeroLB|OidcReject|ControllerRestart' ./...
 ```
+
+Always pass `-count=1`: the suite's result depends on VM and cluster state
+that `go test`'s cache cannot see, so a cached "pass" is meaningless.
 
 ### Spec timing
 

@@ -67,7 +67,7 @@ var _ = Describe("two-lb-masq counter validation", func() {
 		var ids []string
 		Eventually(func(g Gomega) {
 			var err error
-			ids, err = harness.CollectBackendIDsFreshConn(ctx, lbIP+":80", 50, 60*time.Second)
+			ids, err = collectIDs(ctx, lbIP+":80", 50, 60*time.Second)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(ids).To(HaveLen(50), "expected all 50 requests to hit a backend")
 		}, 90*time.Second, 2*time.Second).Should(Succeed())
@@ -92,6 +92,11 @@ var _ = Describe("two-lb-masq counter validation", func() {
 				h, b.Packets, b.Bytes, a.Packets, a.Bytes,
 				a.Packets-b.Packets, a.Bytes-b.Bytes)
 		}
+
+		By("asserting the DNAT rule counter advanced for the test traffic")
+		dnatDelta := after[handles[0]].Packets - before[handles[0]].Packets
+		Expect(dnatDelta).To(BeNumerically(">=", 50),
+			"expected the DNAT rule counter to count the 50 requests; a zero delta means traffic never traversed the ingress chain (e.g. it was handled by kube-proxy or dropped earlier)")
 
 		By("asserting drop-rule counter is zero")
 		dropHandle := handles[len(handles)-1]
