@@ -39,6 +39,12 @@ jobs:
           curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.1/lima-2.2.1-Linux-x86_64.tar.gz \
             | sudo tar xz -C /usr/local --strip-components=1
           limactl --version
+      - name: Install QEMU (Lima's VM driver on Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils ovmf
+          qemu-img --version | head -1
+          qemu-system-x86_64 --version | head -1
       - name: Enable nested KVM (faster lima boot)
         run: |
           sudo chmod 666 /dev/kvm || true
