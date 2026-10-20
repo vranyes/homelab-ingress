@@ -134,7 +134,12 @@ func (s *State) Unsubscribe(ch chan LBNotification) {
 	defer s.mu.Unlock()
 	for i, sub := range s.subscribers {
 		if sub == ch {
-			s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
+			// Copy-on-remove: notify() may hold a snapshot of the old
+			// slice header, so never mutate the backing array in place.
+			kept := make([]chan LBNotification, 0, len(s.subscribers)-1)
+			kept = append(kept, s.subscribers[:i]...)
+			kept = append(kept, s.subscribers[i+1:]...)
+			s.subscribers = kept
 			close(ch)
 			return
 		}
@@ -142,10 +147,12 @@ func (s *State) Unsubscribe(ch chan LBNotification) {
 }
 
 func (s *State) notify(notification LBNotification) {
+	// Hold RLock for the whole send loop: Unsubscribe takes Lock before
+	// close(ch), so a close can never interleave with a send (even the
+	// non-blocking select-send panics on a closed channel).
 	s.mu.RLock()
-	subs := s.subscribers
-	s.mu.RUnlock()
-	for _, ch := range subs {
+	defer s.mu.RUnlock()
+	for _, ch := range s.subscribers {
 		select {
 		case ch <- notification:
 		default:
