@@ -16,6 +16,14 @@ const reconcileInterval = 30 * time.Second
 
 type IPChangeFunc func(iface string, ip net.IP, mask net.IPMask)
 
+// newRealClientFn is the constructor used by ensureAndStart. It is a var
+// (not a direct call) so unit tests can substitute a fake Client without
+// touching raw sockets. Production default delegates to newRealClient; see
+// TestNewRealClientFnDefaultIsRealConstructor.
+var newRealClientFn = func(iface string, mac net.HardwareAddr, leaseInfo *LeaseInfo, onChange IPChangeFunc, logger *slog.Logger) Client {
+	return newRealClient(iface, mac, leaseInfo, onChange, logger)
+}
+
 type Client interface {
 	Start() error
 	Stop()
@@ -77,7 +85,7 @@ func (m *Manager) ensureAndStart(iface string, mac net.HardwareAddr, serviceKey 
 			delete(m.leases, serviceKey)
 		}
 
-		client = newRealClient(iface, mac, leaseInfo, m.onIPChange, m.logger)
+		client = newRealClientFn(iface, mac, leaseInfo, m.onIPChange, m.logger)
 		m.clients[iface] = client
 	}
 	m.mu.Unlock()
@@ -185,6 +193,12 @@ func (m *Manager) remove(iface string) {
 	if ok {
 		delete(m.clients, iface)
 	}
+	// Drop the interface->service mapping too: without this a renamed or
+	// stale interface keeps resolving to its old service key (and a future
+	// onIPChange on the dead interface would resurrect state for it).
+	// handleDelete's explicit deleteServiceMapping call is now redundant
+	// but harmless.
+	delete(m.ifaceToService, iface)
 	m.mu.Unlock()
 
 	if ok {
