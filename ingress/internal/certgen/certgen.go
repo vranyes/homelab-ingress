@@ -25,14 +25,40 @@ func caCertPath(dir string) string  { return filepath.Join(dir, caCertFile) }
 func caKeyPath(dir string) string   { return filepath.Join(dir, caKeyFile) }
 
 func loadOrCreateCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
-	certPEM, err := os.ReadFile(caCertPath(dir))
-	if err == nil {
-		keyPEM, err := os.ReadFile(caKeyPath(dir))
-		if err == nil {
-			return parseCA(certPEM, keyPEM)
-		}
-	}
+	certPEM, certErr := os.ReadFile(caCertPath(dir))
+	keyPEM, keyErr := os.ReadFile(caKeyPath(dir))
 
+	switch {
+	case certErr == nil && keyErr == nil:
+		// Both present: reuse if parseable. parseCA returns an error
+		// without touching disk, so corrupt material is never silently
+		// replaced.
+		return parseCA(certPEM, keyPEM)
+
+	case os.IsNotExist(certErr) && os.IsNotExist(keyErr):
+		// First boot: neither file exists yet. Generate and persist.
+		return generateAndPersistCA(dir)
+
+	default:
+		// Partial state: one file exists (or is unreadable) while the
+		// other does not. The existing material may be live (clients
+		// pinning ca.pem), so refuse to overwrite it with a fresh CA.
+		// Surface the underlying read error when it is not a simple
+		// "not exist" (e.g. permissions on the 0600 key file).
+		if certErr != nil && !os.IsNotExist(certErr) {
+			return nil, nil, fmt.Errorf("read ca cert: %w", certErr)
+		}
+		if keyErr != nil && !os.IsNotExist(keyErr) {
+			return nil, nil, fmt.Errorf("read ca key: %w", keyErr)
+		}
+		return nil, nil, fmt.Errorf(
+			"incomplete CA state in %q: ca.pem present=%v, ca-key.pem present=%v; "+
+				"refusing to regenerate over existing material (restore or remove both files)",
+			dir, certErr == nil, keyErr == nil)
+	}
+}
+
+func generateAndPersistCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	cert, key, err := generateCA()
 	if err != nil {
 		return nil, nil, err
