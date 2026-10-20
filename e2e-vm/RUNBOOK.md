@@ -18,6 +18,22 @@ cd /root/homelab-ingress/e2e
 go test -tags=e2e -v -run 'TwoLB|Masq' ./...
 ```
 
+## Unit tests inside the VM (linux-only packages)
+
+`ingress/internal/dhcp`, `nftables/validate`, and friends are `//go:build linux`
+and need a Linux kernel to execute — macOS can only compile-check them
+(`GOOS=linux go test -c`). To actually run them:
+
+```bash
+make test-unit-vm   # host: boots VM if needed, ships ingress/, runs go test ./internal/... as root
+```
+
+This stages a fresh copy of `ingress/` into the VM on every run, so no stale
+sources. The VM is left running for reuse by `make test-e2e`. `go test`
+downloads module deps on first run (VM has egress via NAT); subsequent runs
+reuse the module cache. In CI this runs automatically as the step before
+`make test-e2e`, sharing the same VM boot.
+
 ## Log locations
 
 | Log | Meaning |

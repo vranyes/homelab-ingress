@@ -104,7 +104,7 @@ remove-e2e-vm: ## Stop and delete the running VM instance
 # E2E test targets
 # ------------------------------------------------------------------
 
-.PHONY: ensure-e2e-vm copy-e2e-vm test-e2e-bringup test-e2e-shell
+.PHONY: ensure-e2e-vm copy-e2e-vm copy-ingress-vm test-unit-vm test-e2e-bringup test-e2e-shell
 
 ensure-e2e-vm: ## Start the e2e VM if it is not already running
 	@if ! limactl list 2>/dev/null | grep -q "^$(LIMA_VM)[[:space:]].*Running"; then \
@@ -127,6 +127,18 @@ copy-e2e-vm: build-e2e-binaries ## Stage e2e/controller sources + pre-built bina
 	limactl shell $(LIMA_VM) -- sudo cp /tmp/oidc-mock /usr/local/bin/
 
 test-e2e-bringup: ensure-e2e-vm copy-e2e-vm ## Boot VM and stage sources+binaries without running tests
+
+copy-ingress-vm: ## Stage ingress module sources into the VM (for in-VM unit tests)
+	@echo "==> Copying ingress directory into VM"
+	limactl shell $(LIMA_VM) -- sudo mkdir -p /root/homelab-ingress/ingress
+	tar czf - --no-xattrs -C $(ROOT)/ingress . | limactl shell $(LIMA_VM) -- sudo tar xzf - -C /root/homelab-ingress/ingress/
+
+test-unit-vm: ensure-e2e-vm copy-ingress-vm ## Run ingress unit tests inside the VM (covers linux-only packages)
+	@echo "==> Running ingress unit tests inside the VM"
+	limactl shell $(LIMA_VM) -- sudo sh -c ' \
+		set -e; \
+		cd /root/homelab-ingress/ingress && go test ./internal/... -count=1 -v'
+	@echo "==> VM left running for reuse (run 'make remove-e2e-vm' to clean up)"
 
 test-e2e-shell: test-e2e-bringup ## Stage everything and drop into an interactive root shell in the VM
 	@echo "==> Opening interactive shell (k3s at /etc/rancher/k3s/k3s.yaml, logs in /var/log/hl-ingress/)"

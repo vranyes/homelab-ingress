@@ -48,6 +48,8 @@ jobs:
           path: |
             ~/.cache/lima
           key: lima-hl-ingress-${{ hashFiles('e2e-vm/**') }}
+      - name: Run ingress unit tests in VM (linux-only packages)
+        run: make test-unit-vm
       - name: Run e2e suite
         run: make test-e2e
       - name: Collect logs on failure
