@@ -35,7 +35,8 @@ jobs:
           cd e2e && GOOS=linux go vet -tags=e2e ./...
       - name: Install lima
         run: |
-          curl -fsSL https://github.com/lima-vm/lima/releases/download/v0.23.2/lima-0.23.2-Linux-x86_64.tar.gz \
+          # Lima >= 2.0 is required: e2e-vm/lima.yaml uses `provision: mode: data`.
+          curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.1/lima-2.2.1-Linux-x86_64.tar.gz \
             | sudo tar xz -C /usr/local --strip-components=1
           limactl --version
       - name: Enable nested KVM (faster lima boot)
