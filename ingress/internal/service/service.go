@@ -129,8 +129,14 @@ func (s *RouterServer) ListLoadBalancers(ctx context.Context, req *routerv1.List
 	for key, svc := range snap.Services {
 		resp := &routerv1.GetLoadBalancerResponse{
 			ServiceKey: key,
-			AssignedIp: svc.SourceAddress.String(),
 			Ports:      statePortsToProto(svc.Targets),
+		}
+		// Mirror GetLoadBalancer: a DHCP-pending service has no source
+		// address yet. net.IP(nil).String() returns "<nil>", which the
+		// controller's IP poller would otherwise write into Service
+		// status as a literal IP. Leave the field empty instead.
+		if svc.SourceAddress != nil {
+			resp.AssignedIp = svc.SourceAddress.String()
 		}
 		if svc.DHCPAcquired != nil {
 			resp.DhcpAcquired = *svc.DHCPAcquired
