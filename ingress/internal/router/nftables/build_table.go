@@ -65,25 +65,27 @@ func buildRoundRobinExprs(
 		// val[6:8] stays zero (padding)
 
 		elements = append(elements, nftables.SetElement{
-			Key: binaryutil.BigEndian.PutUint32(uint32(i)),
+			Key: binaryutil.NativeEndian.PutUint32(uint32(i)),
 			Val: val,
 		})
 	}
 
 	// ── 1. Build the numgen→(ipv4_addr . inet_service) map ────────────────
 	//
-	// Key:   TypeMark   (4 bytes, network-byte-order uint32: 0, 1, 2, …)
+	// Key:   TypeInteger (4 bytes, NATIVE byte order uint32: 0, 1, 2, …)
 	// Value: TypeIPAddr . TypeInetService
 	//          [0:4]  IPv4 address  (4 bytes, network order)
 	//          [4:6]  port          (2 bytes, big-endian)
 	//          [6:8]  zero-padding  (inet_service padded to 4 bytes in concat)
 	//
-	// NOTE: using TypeMark rather than TypeInteger because the kernel expects
-	// integer-type keys in host byte order, but the nftables Go library
-	// encodes them with BigEndian. On little-endian (x86) hardware, element 1
-	// gets stored as 0x01000000 (16777216) while numgen outputs 1 → lookup
-	// fails → packet misses DNAT. TypeMark uses network byte order, which
-	// matches BigEndian encoding.
+	// The lookup key must use NATIVE byte order: nft_numgen stores its result
+	// into the register as a u32 in host byte order, and the kernel compares
+	// the register's raw bytes against the set key. Storing keys big-endian
+	// (as this code previously did) makes index 0 work — all-zero bytes — and
+	// every other index miss on little-endian hardware, so those packets skip
+	// the DNAT rule, fall through to the service's drop rule, and only get
+	// through on a 1s TCP SYN retransmit. With N backends, only index 0 ever
+	// receives traffic.
 
 	var lbMap *nftables.Set
 	n := fmt.Sprintf("map_%s_%d", sname, port)
@@ -109,7 +111,7 @@ func buildRoundRobinExprs(
 			Name:     fmt.Sprintf("map_%s_%d", sname, port),
 			Constant: false,
 			IsMap:    true,
-			KeyType:  nftables.TypeMark,
+			KeyType:  nftables.TypeInteger,
 			DataType: nftables.MustConcatSetType(nftables.TypeIPAddr, nftables.TypeInetService),
 		}
 		// AddSet populates lbMap.ID, which the Lookup expr below must reference.
@@ -227,6 +229,13 @@ func buildRoundRobinExprs(
 
 		// dnat to regBase:regProto
 		// RegAddrMin==RegAddrMax and RegProtoMin==RegProtoMax → single
+		// The counter must precede the NAT statement: NAT terminates rule
+		// evaluation, so a counter placed after it never runs and every
+		// per-rule counter reads zero even while traffic flows. Tests and
+		// operators rely on these counters to tell "no traffic" apart from
+		// "traffic dropped".
+		&expr.Counter{},
+
 		// destination, not a range.
 		&expr.NAT{
 			Type:        expr.NATTypeDestNAT,
@@ -234,8 +243,6 @@ func buildRoundRobinExprs(
 			RegAddrMin:  regBase,
 			RegProtoMin: regProto,
 		},
-
-		&expr.Counter{},
 
 		&expr.Verdict{
 			Kind: expr.VerdictAccept,

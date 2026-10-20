@@ -86,11 +86,13 @@ func TestSafeName(t *testing.T) {
 	if other := safeName("ns/other"); other == a {
 		t.Fatalf("collision between distinct keys: %q", a)
 	}
-	// Long keys are truncated but stay distinct via the hash prefix.
+	// Long keys are truncated but stay distinct via the hash prefix:
+	// 32 hex chars + "_" + at most 32 sanitized chars = 65.
+	const maxLen = 32 + 1 + 32
 	long1 := safeName("very-long-namespace-name-that-exceeds-limits/service-one")
 	long2 := safeName("very-long-namespace-name-that-exceeds-limits/service-two")
-	if len(long1) > 64 {
-		t.Fatalf("unexpectedly long: %q", long1)
+	if len(long1) > maxLen {
+		t.Fatalf("unexpectedly long (%d > %d): %q", len(long1), maxLen, long1)
 	}
 	if long1 == long2 {
 		t.Fatalf("truncated names collide: %q", long1)
