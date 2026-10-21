@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -163,6 +164,15 @@ func DeployIdenticon(ctx context.Context, cl client.Client, ns, name string, rep
 // this Service because it has a selector. The controller's EndpointSlice
 // watcher picks them up by the standard kubernetes.io/service-name label.
 func CreateLBService(ctx context.Context, cl client.Client, ns, name string, externalPort, targetPort int32) error {
+	return CreateLBServiceWithGeos(ctx, cl, ns, name, externalPort, targetPort, nil)
+}
+
+// AnnotationAllowedGeos mirrors the controller's annotation name.
+const AnnotationAllowedGeos = "homelab-ingress.vranyes.com/allowed-geos"
+
+// CreateLBServiceWithGeos is CreateLBService with the allowed-geos annotation.
+// geos must already be normalised ISO-3166 alpha-2 codes.
+func CreateLBServiceWithGeos(ctx context.Context, cl client.Client, ns, name string, externalPort, targetPort int32, geos []string) error {
 	labels := map[string]string{"app": name}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -181,6 +191,9 @@ func CreateLBService(ctx context.Context, cl client.Client, ns, name string, ext
 				Protocol:   corev1.ProtocolTCP,
 			}},
 		},
+	}
+	if len(geos) > 0 {
+		svc.Annotations = map[string]string{AnnotationAllowedGeos: strings.Join(geos, ",")}
 	}
 	if err := cl.Create(ctx, svc); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create lb service: %w", err)
@@ -213,6 +226,36 @@ func GetService(ctx context.Context, cl client.Client, ns, name string) (*corev1
 		return nil, err
 	}
 	return svc, nil
+}
+
+// SetAllowedGeos replaces the allowed-geos annotation on a Service. An empty
+// list removes the annotation, which re-allows all traffic. Conflicts are
+// retried because the controller patches status concurrently.
+func SetAllowedGeos(ctx context.Context, cl client.Client, ns, name string, geos []string) error {
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		svc, err := GetService(ctx, cl, ns, name)
+		if err != nil {
+			return err
+		}
+		if len(geos) == 0 {
+			delete(svc.Annotations, AnnotationAllowedGeos)
+		} else {
+			if svc.Annotations == nil {
+				svc.Annotations = make(map[string]string, 1)
+			}
+			svc.Annotations[AnnotationAllowedGeos] = strings.Join(geos, ",")
+		}
+		if err := cl.Update(ctx, svc); err != nil {
+			if apierrors.IsConflict(err) {
+				lastErr = err
+				continue
+			}
+			return fmt.Errorf("update allowed-geos annotation: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("update allowed-geos annotation after retries: %w", lastErr)
 }
 
 // ServiceStatusIP returns the first ingress IP from a Service's status, or

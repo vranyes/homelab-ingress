@@ -1,6 +1,6 @@
 # ADR 0003: MaxMind block optional at startup, geo request rejected at RPC layer
 
-**Status:** Accepted  
+**Status:** Accepted (provider choice amended by ADR 0006)\
 **Date:** 2026-08-06  
 **Grill:** #3 (maxmind.license_key required breaks backward compat)
 

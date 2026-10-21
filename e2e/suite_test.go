@@ -77,6 +77,13 @@ var _ = BeforeSuite(func() {
 	// timeout indirectly by extending ctx via deadline in each step.
 	_ = ctx
 
+	By("resetting dnsmasq leases from any previous run")
+	// Kept VMs accumulate leases when a run is interrupted; the pool is only
+	// 91 addresses and a full pool makes every later spec time out waiting
+	// for a status IP with no useful signal. Restarting also validates the
+	// unit before the relay preflight below.
+	Expect(harness.ResetDHCPLeases(ctx)).To(Succeed())
+
 	By("verifying VEPA hairpin relay (ns-server + tc mirred + dnsmasq) is up")
 	Expect(harness.EnsureVepaRelayUp(ctx)).To(Succeed(),
 		"VEPA relay not healthy — re-run `make start-e2e-vm`; see diagnostic dump for details")
@@ -92,6 +99,12 @@ var _ = BeforeSuite(func() {
 	// one; `: >` also creates the file when it does not exist yet.
 	_, err = harness.RunShell(ctx, "for f in ingress controller oidc; do : > /var/log/hl-ingress/$f.log; done")
 	Expect(err).NotTo(HaveOccurred())
+
+	By("resetting the mock geo database")
+	// Specs mutate this fixture to prove the watcher reloads it. Always start
+	// from the canonical carve-up, and write atomically so a crashed run can
+	// never leave a half-written file behind.
+	Expect(harness.WriteFileAtomic(harness.MockGeoPath, []byte(harness.DefaultGeoFixture()), 0o644)).To(Succeed())
 
 	By("creating shared e2e namespace " + e2eNamespace)
 	cl, err := harness.NewClient()

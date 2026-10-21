@@ -269,3 +269,128 @@ func TestHealth(t *testing.T) {
 		}
 	})
 }
+
+// -- geo-blocking tests --
+
+func newGeoTestServer(t *testing.T, geoEnabled bool) (*RouterServer, *state.State) {
+	t.Helper()
+	srv, st := testServer()
+	srv.GeoEnabled = geoEnabled
+	return srv, st
+}
+
+func TestCreateLoadBalancer_StoresGeos(t *testing.T) {
+	srv, st := newGeoTestServer(t, true)
+	_, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey:  "ns/svc",
+		Ports:       validPorts(),
+		AllowedGeos: []string{"us", " ca ", "US"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, ok := st.GetService("ns/svc")
+	if !ok {
+		t.Fatal("service not stored")
+	}
+	if len(svc.AllowedGeos) != 2 || svc.AllowedGeos[0] != "US" || svc.AllowedGeos[1] != "CA" {
+		t.Fatalf("stored geos = %v", svc.AllowedGeos)
+	}
+}
+
+func TestUpdateLoadBalancer_ReplacesGeos(t *testing.T) {
+	srv, st := newGeoTestServer(t, true)
+	if _, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedGeos: []string{"US"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := srv.UpdateLoadBalancer(context.Background(), &routerv1.UpdateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedGeos: []string{"CA"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := st.GetService("ns/svc")
+	if len(svc.AllowedGeos) != 1 || svc.AllowedGeos[0] != "CA" {
+		t.Fatalf("updated geos = %v", svc.AllowedGeos)
+	}
+
+	// Empty list clears the allow-list (allow all).
+	if _, err := srv.UpdateLoadBalancer(context.Background(), &routerv1.UpdateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ = st.GetService("ns/svc")
+	if len(svc.AllowedGeos) != 0 {
+		t.Fatalf("geos not cleared: %v", svc.AllowedGeos)
+	}
+}
+
+func TestGetAndList_ReturnGeos(t *testing.T) {
+	srv, _ := newGeoTestServer(t, true)
+	if _, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedGeos: []string{"US", "CA"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := srv.GetLoadBalancer(context.Background(), &routerv1.GetLoadBalancerRequest{ServiceKey: "ns/svc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.AllowedGeos) != 2 || got.AllowedGeos[0] != "US" || got.AllowedGeos[1] != "CA" {
+		t.Fatalf("Get geos = %v", got.AllowedGeos)
+	}
+
+	list, err := srv.ListLoadBalancers(context.Background(), &routerv1.ListLoadBalancersRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.LoadBalancers) != 1 || len(list.LoadBalancers[0].AllowedGeos) != 2 {
+		t.Fatalf("List geos = %v", list.LoadBalancers)
+	}
+}
+
+func TestGeosRequireMaxMind(t *testing.T) {
+	srv, st := newGeoTestServer(t, false)
+
+	_, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedGeos: []string{"US"},
+	})
+	if codeOf(err) != codes.InvalidArgument {
+		t.Fatalf("Create error = %v, want InvalidArgument", err)
+	}
+	if st.HasService("ns/svc") {
+		t.Fatal("state was mutated on a rejected create")
+	}
+
+	// Empty geos still work without MaxMind (backward compatibility).
+	if _, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/open", Ports: validPorts(),
+	}); err != nil {
+		t.Fatalf("create without geos: %v", err)
+	}
+
+	_, err = srv.UpdateLoadBalancer(context.Background(), &routerv1.UpdateLoadBalancerRequest{
+		ServiceKey: "ns/open", Ports: validPorts(), AllowedGeos: []string{"US"},
+	})
+	if codeOf(err) != codes.InvalidArgument {
+		t.Fatalf("Update error = %v, want InvalidArgument", err)
+	}
+	svc, _ := st.GetService("ns/open")
+	if len(svc.AllowedGeos) != 0 {
+		t.Fatalf("state was mutated on a rejected update: %v", svc.AllowedGeos)
+	}
+}
+
+func TestInvalidGeoCodeRejected(t *testing.T) {
+	srv, _ := newGeoTestServer(t, true)
+	_, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedGeos: []string{"USA"},
+	})
+	if codeOf(err) != codes.InvalidArgument {
+		t.Fatalf("error = %v, want InvalidArgument", err)
+	}
+}

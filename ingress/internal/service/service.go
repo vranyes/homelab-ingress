@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"regexp"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -12,11 +14,16 @@ import (
 	routerv1 "github.com/vranyes/homelab-ingress/ingress/pkg/api/router/v1"
 )
 
+var isoAlpha2RE = regexp.MustCompile(`^[A-Z]{2}$`)
+
 type RouterServer struct {
 	routerv1.UnimplementedRouterServiceServer
 	stateData         *state.State
 	logger            *slog.Logger
 	ActiveMacvlanFunc func() int32
+	// GeoEnabled is set when a MaxMind database is configured. Requests that
+	// carry allowed_geos are rejected while it is false (ADR 0003).
+	GeoEnabled bool
 }
 
 func NewRouterServer(st *state.State, logger *slog.Logger) *RouterServer {
@@ -42,10 +49,16 @@ func (s *RouterServer) CreateLoadBalancer(ctx context.Context, req *routerv1.Cre
 		return nil, status.Error(codes.AlreadyExists, "service already exists")
 	}
 
+	geos, err := s.geosFromRequest(req.AllowedGeos)
+	if err != nil {
+		return nil, err
+	}
+
 	ports := protoPortsToState(req.Ports)
 	svc := &state.LBService{
 		ServiceName: req.ServiceKey,
 		Targets:     ports,
+		AllowedGeos: geos,
 	}
 	s.stateData.UpdateService(svc)
 
@@ -67,7 +80,13 @@ func (s *RouterServer) UpdateLoadBalancer(ctx context.Context, req *routerv1.Upd
 		return nil, status.Error(codes.NotFound, "service not found")
 	}
 
+	geos, err := s.geosFromRequest(req.AllowedGeos)
+	if err != nil {
+		return nil, err
+	}
+
 	svc.Targets = protoPortsToState(req.Ports)
+	svc.AllowedGeos = geos
 	s.stateData.UpdateService(svc)
 
 	s.logger.Info("load balancer updated", "service_key", req.ServiceKey)
@@ -104,8 +123,9 @@ func (s *RouterServer) GetLoadBalancer(ctx context.Context, req *routerv1.GetLoa
 
 	s.logger.Debug("load balancer found", "service_key", req.ServiceKey)
 	resp := &routerv1.GetLoadBalancerResponse{
-		ServiceKey: req.ServiceKey,
-		Ports:      statePortsToProto(svc.Targets),
+		ServiceKey:  req.ServiceKey,
+		Ports:       statePortsToProto(svc.Targets),
+		AllowedGeos: svc.AllowedGeos,
 	}
 	if svc.SourceAddress != nil {
 		resp.AssignedIp = svc.SourceAddress.String()
@@ -128,8 +148,9 @@ func (s *RouterServer) ListLoadBalancers(ctx context.Context, req *routerv1.List
 	var lbs []*routerv1.GetLoadBalancerResponse
 	for key, svc := range snap.Services {
 		resp := &routerv1.GetLoadBalancerResponse{
-			ServiceKey: key,
-			Ports:      statePortsToProto(svc.Targets),
+			ServiceKey:  key,
+			Ports:       statePortsToProto(svc.Targets),
+			AllowedGeos: svc.AllowedGeos,
 		}
 		// Mirror GetLoadBalancer: a DHCP-pending service has no source
 		// address yet. net.IP(nil).String() returns "<nil>", which the
@@ -164,6 +185,33 @@ func (s *RouterServer) Health(ctx context.Context, req *routerv1.HealthRequest) 
 		Healthy:        true,
 		ActiveMacvlans: count,
 	}, nil
+}
+
+// geosFromRequest normalises and validates the requested country codes.
+// Requests carrying geos are rejected while MaxMind is not configured.
+func (s *RouterServer) geosFromRequest(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if !s.GeoEnabled {
+		s.logger.Error("allowed_geos supplied but geo-blocking is not configured")
+		return nil, status.Error(codes.InvalidArgument, "geo-blocking is not configured; no geo database is available")
+	}
+
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, raw := range in {
+		cc := strings.ToUpper(strings.TrimSpace(raw))
+		if !isoAlpha2RE.MatchString(cc) {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid ISO-3166 alpha-2 code %q", raw)
+		}
+		if _, dup := seen[cc]; dup {
+			continue
+		}
+		seen[cc] = struct{}{}
+		out = append(out, cc)
+	}
+	return out, nil
 }
 
 func protoPortsToState(ports []*routerv1.PortMapping) []state.LBTarget {

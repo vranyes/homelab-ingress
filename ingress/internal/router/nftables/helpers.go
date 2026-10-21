@@ -2,11 +2,19 @@ package nftables
 
 import (
 	"crypto/md5"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/vranyes/homelab-ingress/ingress/internal/state"
 )
+
+var isoAlpha2RE = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// errTableNotFound lets callers distinguish "daemon has not created its table
+// yet" from a real netlink failure.
+var errTableNotFound = errors.New("table not found")
 
 func safeName(serviceKey string) string {
 	safe := strings.ReplaceAll(serviceKey, "/", "_")
@@ -22,6 +30,11 @@ func safeName(serviceKey string) string {
 func validateService(svc state.LBService) error {
 	if len(svc.Targets) == 0 {
 		return fmt.Errorf("at least one port target is required")
+	}
+	for _, cc := range svc.AllowedGeos {
+		if !isoAlpha2RE.MatchString(cc) {
+			return fmt.Errorf("invalid ISO-3166 alpha-2 code %q", cc)
+		}
 	}
 	for i, target := range svc.Targets {
 		if target.Protocol != "tcp" && target.Protocol != "udp" {

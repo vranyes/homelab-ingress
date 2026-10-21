@@ -249,3 +249,159 @@ func buildRoundRobinExprs(
 		},
 	}, nil
 }
+
+// setStore is the subset of *nftables.Conn used to materialise geo sets. It
+// exists so the union-set logic can be unit-tested without a netlink socket.
+type setStore interface {
+	GetSets(table *nftables.Table) ([]*nftables.Set, error)
+	AddSet(set *nftables.Set, elements []nftables.SetElement) error
+	FlushSet(set *nftables.Set)
+	SetAddElements(set *nftables.Set, elements []nftables.SetElement) error
+}
+
+func geoSetName(sn string) string { return geoSetPrefix + sn }
+
+type ipRange struct {
+	first uint32
+	last  uint32
+}
+
+// geoRanges normalises CIDRs into sorted, disjoint, inclusive IPv4 ranges.
+// GeoLite2 countries are globally disjoint, but merging keeps the set compact
+// and protects against overlapping input (the kernel rejects duplicate
+// interval elements with EEXIST).
+func geoRanges(cidrs []*net.IPNet) []ipRange {
+	var ranges []ipRange
+	for _, cidr := range cidrs {
+		if cidr == nil {
+			continue
+		}
+		ip4 := cidr.IP.To4()
+		if ip4 == nil {
+			continue
+		}
+		ones, bits := cidr.Mask.Size()
+		if bits != 32 {
+			continue
+		}
+		first := binary.BigEndian.Uint32(ip4.Mask(cidr.Mask))
+		size := uint64(1) << uint(bits-ones)
+		last := uint64(first) + size - 1
+		ranges = append(ranges, ipRange{first: first, last: uint32(last)})
+	}
+	if len(ranges) == 0 {
+		return nil
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].first == ranges[j].first {
+			return ranges[i].last < ranges[j].last
+		}
+		return ranges[i].first < ranges[j].first
+	})
+
+	merged := ranges[:1]
+	for _, r := range ranges[1:] {
+		cur := &merged[len(merged)-1]
+		// Merge overlapping and adjacent ranges.
+		if r.first <= cur.last || (cur.last != ^uint32(0) && r.first == cur.last+1) {
+			if r.last > cur.last {
+				cur.last = r.last
+			}
+			continue
+		}
+		merged = append(merged, r)
+	}
+	return merged
+}
+
+// geoSetElements converts CIDRs into nftables interval-set elements.
+func geoSetElements(cidrs []*net.IPNet) []nftables.SetElement {
+	ranges := geoRanges(cidrs)
+	elements := make([]nftables.SetElement, 0, len(ranges)*2)
+	for _, r := range ranges {
+		first := binary.BigEndian.AppendUint32(nil, r.first)
+		if r.first == r.last {
+			elements = append(elements, nftables.SetElement{Key: first})
+			continue
+		}
+		elements = append(elements,
+			nftables.SetElement{Key: first},
+			nftables.SetElement{
+				Key:         binary.BigEndian.AppendUint32(nil, r.last),
+				IntervalEnd: true,
+			},
+		)
+	}
+	return elements
+}
+
+// buildGeoUnionSet creates or refreshes the per-service union set
+// geo_<safeName(serviceKey)>.
+func buildGeoUnionSet(ss setStore, table *nftables.Table, sn string, cidrs []*net.IPNet) (*nftables.Set, error) {
+	name := geoSetName(sn)
+	elements := geoSetElements(cidrs)
+
+	existing, err := ss.GetSets(table)
+	if err != nil {
+		return nil, fmt.Errorf("get sets: %w", err)
+	}
+	for _, s := range existing {
+		if s.Name != name {
+			continue
+		}
+		ss.FlushSet(s)
+		if len(elements) > 0 {
+			if err := ss.SetAddElements(s, elements); err != nil {
+				return nil, fmt.Errorf("SetAddElements(%s): %w", name, err)
+			}
+		}
+		return s, nil
+	}
+
+	set := &nftables.Set{
+		Table:    table,
+		Name:     name,
+		KeyType:  nftables.TypeIPAddr,
+		Interval: true,
+	}
+	if err := ss.AddSet(set, elements); err != nil {
+		return nil, fmt.Errorf("AddSet(%s): %w", name, err)
+	}
+	return set, nil
+}
+
+// buildGeoSetDenyExprs returns:
+//
+//	ip daddr <extIP> ip saddr not in @<geoSet> counter drop
+//
+// The deny verdict must precede the DNAT rules: an accept in nat prerouting
+// terminates chain evaluation, which would invert the allow-list (ADR 0001).
+func buildGeoSetDenyExprs(extIP net.IP, set *nftables.Set) []expr.Any {
+	return []expr.Any{
+		&expr.Payload{
+			DestRegister: 0x1,
+			Base:         expr.PayloadBaseNetworkHeader,
+			Offset:       0x10, // IPv4 daddr
+			Len:          0x4,
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 0x1,
+			Data:     extIP.To4(),
+		},
+		&expr.Payload{
+			DestRegister: 0x1,
+			Base:         expr.PayloadBaseNetworkHeader,
+			Offset:       0x0c, // IPv4 saddr
+			Len:          0x4,
+		},
+		&expr.Lookup{
+			SourceRegister: 0x1,
+			SetName:        set.Name,
+			SetID:          set.ID,
+			Invert:         true,
+		},
+		&expr.Counter{},
+		&expr.Verdict{Kind: expr.VerdictDrop},
+	}
+}

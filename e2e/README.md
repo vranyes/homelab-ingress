@@ -49,6 +49,7 @@ at allocated LB IPs, and inspects nftables and log files for assertions.
 | `churn_test.go`                  | 0→1   | 1          | recreate within 10s; reconverges within 30s                                                                      |
 | `oidc_reject_test.go`            | 1     | 1          | mutated token (aud=bogus) rejected; controller log shows Unauthenticated; no Service status IP set               |
 | `grpc_list_test.go`              | 1     | 1          | `Get` and `List` report the same converged IP; no entry ever contains `"<nil>"`                                  |
+| `geo_block_test.go`              | 1–2   | 1          | geo deny precedes DNAT; US allowed/EU dropped; annotation flip; DB hot-reload; per-service sets                  |
 
 Traffic is always generated **inside the `ns-server` VEPA peer namespace**
 (`collectIDs` → `CollectBackendIDsFromNS`), never from the test process's
@@ -58,6 +59,14 @@ kube-proxy's OUTPUT chain — it never reaches the ingress daemon's prerouting
 rules, and assertions built on it stay green even when those rules are
 broken. Requests from `ns-server` arrive over the bridge and do traverse the
 ingress chains.
+
+Geo-blocking specs use a TSV-backed mock geo database at
+`/var/lib/homelab-ingress/mock-geo.tsv` (selected by `geoip.provider: mock`).
+It maps four `/26` slices of `10.44.0.0/24` to US, CA, EU and XX. Specs that
+need an EU source add `10.44.0.129/24` to `ns-server`'s `veth-outer` and bind
+curl with `--interface`. `BeforeSuite` rewrites the fixture atomically and
+stops/truncates/starts the in-netns dnsmasq so a kept VM starts with a clean
+91-address lease pool (an interrupted run can otherwise exhaust it).
 
 Traffic also uses fresh TCP connections (curl is invoked per request, and
 `CollectBackendIDsFreshConn` sets `DisableKeepAlives`): keep-alive reuses the

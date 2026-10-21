@@ -5,7 +5,6 @@ package e2e_test
 import (
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -55,12 +54,15 @@ var _ = Describe("two-lb-masq counter validation", func() {
 		DeferCleanup(removePostroutingRule, masqRuleHandle)
 
 		By("snapshotting pre-test counters for chain " + chainName)
-		var before map[uint64]harness.CounterStat
+		var beforeDNAT, beforeDrop harness.CounterStat
 		Eventually(func(g Gomega) {
-			var err error
-			before, err = harness.GetRuleCounters(harness.NFTTableName, chainName)
+			rules, err := harness.ClassifyRules(svcKey)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(before).NotTo(BeEmpty())
+			var ok bool
+			beforeDNAT, ok = harness.CounterFor(rules, harness.RuleKindDNAT)
+			g.Expect(ok).To(BeTrue(), "DNAT rule missing")
+			beforeDrop, ok = harness.CounterFor(rules, harness.RuleKindDrop)
+			g.Expect(ok).To(BeTrue(), "final drop rule missing")
 		}, 15*time.Second, 500*time.Millisecond).Should(Succeed())
 
 		By(fmt.Sprintf("firing 50 HTTP requests (fresh connections) against %s:80", lbIP))
@@ -73,35 +75,20 @@ var _ = Describe("two-lb-masq counter validation", func() {
 		}, 90*time.Second, 2*time.Second).Should(Succeed())
 
 		By("snapshotting post-test counters")
-		after, err := harness.GetRuleCounters(harness.NFTTableName, chainName)
-		Expect(err).NotTo(HaveOccurred())
-
-		By("computing and logging counter deltas")
-		handles := make([]uint64, 0, len(after))
-		for h := range after {
-			handles = append(handles, h)
-		}
-		sort.Slice(handles, func(i, j int) bool { return handles[i] < handles[j] })
-
-		fmt.Fprintf(GinkgoWriter, "rule handles (sorted): %v\n", handles)
-		for _, h := range handles {
-			b := before[h]
-			a := after[h]
-			fmt.Fprintf(GinkgoWriter,
-				"  handle %d: before={pkt=%d, bytes=%d} after={pkt=%d, bytes=%d} delta={pkt=%d, bytes=%d}\n",
-				h, b.Packets, b.Bytes, a.Packets, a.Bytes,
-				a.Packets-b.Packets, a.Bytes-b.Bytes)
-		}
+		afterDNAT, ok := harness.CounterFor(mustClassify(svcKey), harness.RuleKindDNAT)
+		Expect(ok).To(BeTrue())
+		afterDrop, ok := harness.CounterFor(mustClassify(svcKey), harness.RuleKindDrop)
+		Expect(ok).To(BeTrue())
 
 		By("asserting the DNAT rule counter advanced for the test traffic")
-		dnatDelta := after[handles[0]].Packets - before[handles[0]].Packets
+		dnatDelta := afterDNAT.Packets - beforeDNAT.Packets
+		fmt.Fprintf(GinkgoWriter, "DNAT counter delta=%d\n", dnatDelta)
 		Expect(dnatDelta).To(BeNumerically(">=", 50),
 			"expected the DNAT rule counter to count the 50 requests; a zero delta means traffic never traversed the ingress chain (e.g. it was handled by kube-proxy or dropped earlier)")
 
 		By("asserting drop-rule counter is zero")
-		dropHandle := handles[len(handles)-1]
-		dropDelta := after[dropHandle].Packets - before[dropHandle].Packets
-		fmt.Fprintf(GinkgoWriter, "drop rule handle=%d packet delta=%d\n", dropHandle, dropDelta)
+		dropDelta := afterDrop.Packets - beforeDrop.Packets
+		fmt.Fprintf(GinkgoWriter, "drop rule packet delta=%d\n", dropDelta)
 		Expect(dropDelta).To(BeZero(),
 			"expected zero drop-rule hits; non-zero means packets are being silently dropped")
 

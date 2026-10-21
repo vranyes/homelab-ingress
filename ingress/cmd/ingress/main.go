@@ -24,6 +24,8 @@ import (
 	"github.com/vranyes/homelab-ingress/ingress/internal/certgen"
 	"github.com/vranyes/homelab-ingress/ingress/internal/config"
 	"github.com/vranyes/homelab-ingress/ingress/internal/dhcp"
+	"github.com/vranyes/homelab-ingress/ingress/internal/geo"
+	"github.com/vranyes/homelab-ingress/ingress/internal/geoip"
 	"github.com/vranyes/homelab-ingress/ingress/internal/macvlan"
 	"github.com/vranyes/homelab-ingress/ingress/internal/router"
 	"github.com/vranyes/homelab-ingress/ingress/internal/router/nftables"
@@ -47,6 +49,10 @@ func main() {
 		logger.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+	cfg.GeoIP.ApplyDefaults(*stateDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	st, err := loadState(logger, *stateDir, cfg.BaseInterface)
 	if err != nil {
@@ -63,17 +69,52 @@ func main() {
 	defer dhcpMgr.StopAll()
 	defer dhcpMgr.Stop()
 
+	// Geo-blocking is optional (ADR 0003, ADR 0006). When a country database
+	// is configured, geo.Manager owns the country→CIDR cache and pushes
+	// service set refreshes into the nftables manager (ADR 0004).
+	var geoMgr *geo.Manager
+	var mm *geoip.Manager
+	if cfg.GeoIP.Enabled() {
+		mm, err = geoip.New(cfg.GeoIP, logger)
+		if err != nil {
+			logger.Error("failed to initialize geoip", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("geo-blocking enabled",
+			"provider", cfg.GeoIP.Provider,
+			"cache_path", cfg.GeoIP.CachePath,
+			"mock", cfg.GeoIP.Mock())
+		if cfg.GeoIP.Provider == config.ProviderDBIP {
+			// DB-IP Lite is CC BY 4.0; attribution is required.
+			logger.Info("geo data by DB-IP", "attribution", "https://db-ip.com")
+		}
+		geoMgr = geo.NewManager(mm, st, logger, cfg.GeoIP.CachePath)
+	}
+
 	var nftOpts []nftables.Option
 	for _, r := range cfg.Masquerade {
 		nftOpts = append(nftOpts, nftables.WithMasquerade(r.InputDevice, r.OutputDevice))
 	}
+	if geoMgr != nil {
+		nftOpts = append(nftOpts, nftables.WithGeoLookup(geoMgr.CountryCIDRs))
+	}
 	iml := nftables.NewManager(logger, nftOpts...)
+	if geoMgr != nil {
+		geoMgr.OnRebuild(func(svcCIDRs map[string][]*net.IPNet) {
+			if err := iml.RefreshGeoSets(svcCIDRs); err != nil {
+				logger.Error("failed to refresh geo sets", "error", err)
+			}
+		})
+		go geoMgr.Run(ctx)
+		go mm.Run(ctx, cfg.GeoIP.RefreshInterval)
+	}
 	rmgr := router.NewManager(iml, st, logger)
 	go rmgr.Run(st.Subscribe())
 
 	// reuse the same store instance created earlier
 	srv := service.NewRouterServer(st, logger)
 	srv.ActiveMacvlanFunc = linkMgr.ActiveCount
+	srv.GeoEnabled = cfg.GeoIP.Enabled()
 
 	// Load or create a root CA and generate a leaf TLS certificate for the server.
 	serverNames := []string{stripPort(cfg.GRPC.Listen)}
@@ -152,6 +193,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-sigCh
 	logger.Info("received signal, shutting down", "signal", sig)
+	cancel()
 
 	// Ordered shutdown. The naive order (linkMgr.DeleteAll before the
 	// deferred dhcpMgr.StopAll) tears interfaces down while the per-service

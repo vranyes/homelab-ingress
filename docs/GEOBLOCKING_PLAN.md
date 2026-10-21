@@ -6,6 +6,18 @@ service; the ingress daemon enforces them at the kernel level via nftables
 set membership, with country data sourced from a MaxMind GeoLite2 Country
 database.
 
+> **Implementation status (2026-10-20): implemented.** Protobuf, ingress
+> config/state/service packages, `geoip`, `geo`, nftables sets/rules,
+> controller annotation plumbing, unit tests, and the e2e harness/specs are in
+> place. The config block/package are named `geoip` because the backend is
+> pluggable: MaxMind GeoLite2 (license key) or free DB-IP Lite (no key), with a
+> TSV mock for e2e (ADR 0006). Other deviations from this plan are recorded in
+> ADR 0005 (EU traffic uses a secondary address on `ns-server` instead of a
+> separate `ns-external` namespace; the nftables layer exposes a
+> `setStore`/`planRules` seam so rule ordering is unit-tested without netlink).
+> Sections 6.2–6.3 below describe the original harness sketch; the shipped
+> helpers/specs are listed there as implementation notes.
+
 ## 1. Design Decisions (locked)
 
 - **Geo → CIDR translation lives in the ingress daemon, not the controller.**
@@ -19,15 +31,15 @@ database.
   `homelab-ingress.vranyes.com/allowed-geos: "US,CA"`, parsed by the existing
   `controller/internal/controller/annotations.go`. Empty/absent annotation =
   allow all traffic (backward compatible).
-- **nftables**: the existing per-LB prerouting chain (`pre_<svc>`) gets a
-  geo-accept rule inserted *before* each DNAT rule. The existing final
-  `drop` rule at the end of the chain catches everything not explicitly
-  accepted (geo-allow-list or DNAT accept).
-- **Geo set shape**: a single nftables `Set` keyed by IPv4 address with
-  `interval` elements, *per country code*. The set is shared across all
-  services that reference the same country code. nftables set lookups are
-  kernel-level; this scales to the full ISO-3166 set without user-space
-  cost.
+- **nftables**: each per-LB prerouting chain (`pre_<svc>`) starts with one
+  deny rule: `ip daddr <extIP> ip saddr not in @geo_<sn> counter drop`.
+  It must precede the DNAT rules, because an `accept` verdict in nat
+  prerouting terminates chain evaluation (see ADR 0001). Chains without
+  `allowed_geos` keep the existing DNAT-then-drop shape.
+- **Geo set shape**: one nftables interval `Set` per service (`geo_<sn>`,
+  `sn = safeName(serviceKey)`) holding the *union* of all allowed
+  countries' IPv4 CIDRs. Sets are created/flushed by the ingress daemon and
+  removed with the service by the existing `RemoveRules` cleanup.
 - **Set (re)build triggers** (any one is enough to rebuild):
   1. fs-notify watch on the MaxMind DB path.
   2. 30s fallback poller for bind-mounted filesystems where inotify may not
@@ -102,35 +114,49 @@ Rationale: keep geos at the request level, not per-port. The existing
 per-LB nftables chain `pre_<svc>` already gates on `ip daddr <extIP>`, so
 geo filtering naturally lives at the same scope.
 
-The ingress daemon's gRPC server validates that `maxmind` is configured
+The ingress daemon's gRPC server validates that a geo database is configured
 before accepting non-empty `allowed_geos`; returns `InvalidArgument`
 otherwise. The controller's existing error handling (non-retryable error
 → log + requeue) surfaces this without special controller-side code.
 
 ## 4. Ingress — Implementation
 
+> **Superseded naming:** the plan below was written for MaxMind only. The
+> shipped config block and Go package are `geoip`, and `provider` selects
+> `maxmind`, `dbip` (free, no key) or `mock`. See ADR 0006. References to
+> `maxmind.*` below describe the MaxMind provider's internals; they remain
+> accurate for that provider.
+
 ### 4.1 Config (`ingress/internal/config/config.go`)
 
-Add a new `MaxMind` block:
+Add an optional `geoip` block:
 
 ```yaml
-maxmind:
-  license_key: "<MaxMind license key>"
-  edition: "GeoLite2-Country"               # default
+geoip:
+  provider: "dbip"                           # maxmind | dbip | mock; empty disables
+  # license_key: "<MaxMind license key>"     # required only for provider: maxmind
+  # download_url: "https://..."              # optional mirror/offline override
+  edition: "GeoLite2-Country"               # maxmind only; default
   refresh_interval: "24h"                   # default
-  cache_path: "/var/lib/homelab-ingress/geolite2-country.mmdb"
+  cache_path: "/var/lib/homelab-ingress/dbip-country-lite.mmdb"
+  stale_after: "840h"                       # default 35d for dbip, 7d for maxmind
 ```
 
 Validation:
-- If `maxmind` block is absent or `maxmind.license_key` is empty: **not an
-  error.** Geo-blocking is disabled at the service level: any `allowed_geos`
+- If the `geoip` block is absent or `provider` is empty: **not an error.**
+  Geo-blocking is disabled at the service level: any `allowed_geos`
   annotation on a K8s Service or any `allowed_geos` field in a proto
   `CreateLoadBalancer`/`UpdateLoadBalancer` request returns
-  `InvalidArgument` ("MaxMind not configured"). Existing deployments with
-  no MaxMind block continue to work unchanged.
-- If `cache_path` is empty: default under `--state-dir`.
-- If `license_key == "mock"` the daemon uses an internal TSV-backed mock
-  reader instead of the MMDB. This is the e2e-only code path.
+  `InvalidArgument` ("geo-blocking is not configured"). Existing
+  deployments with no `geoip` block continue to work unchanged.
+- `provider: maxmind` requires `license_key`; `dbip` and `mock` do not.
+  An unknown provider is a config error.
+- A `license_key` with no `provider` still implies `maxmind`, and
+  `license_key: "mock"` still selects the e2e fixture.
+- If `cache_path` is empty: default under `--state-dir` (provider-specific
+  filename).
+- If `provider: "mock"` the daemon uses an internal TSV-backed mock
+  reader instead of an MMDB. This is the e2e-only code path.
 
 Add unit tests in `config_test.go` for the new block.
 
@@ -459,16 +485,45 @@ In `e2e-vm/lima.yaml` (provision script `scripts/03-geolite-mock.sh`):
       externalPort, targetPort int32, geos []string) error
   ```
   which sets the `homelab-ingress.vranyes.com/allowed-geos` annotation.
-- `e2e/harness/nft.go` — add
-  - `AssertGeoSetExists(cc string)` — opens an nftables conn, walks chains
-    in the `homelab_ingress` table, returns nil if a set named `geo_<cc>`
-    exists (use `conn.GetSets`).
-  - `GetRuleCounters(tableName, chainName)` is already exported and is
-    what we use to count geo-accept and drop rule hits.
+- `e2e/harness/nft.go` — added
+  - `GeoSetName(serviceKey)`, `GetGeoSet(serviceKey)` and
+    `AssertGeoSetExists(serviceKey)` — resolve the per-service union set
+    `geo_<sn>` in the `homelab_ingress` table via `conn.GetSets`.
+  - `ClassifyRules(serviceKey)` — returns each rule in the per-LB chain in
+    evaluation order, classified as `geo-deny` (inverted Lookup), `dnat`,
+    `drop`, or `other`, together with its counter. This replaced the old
+    handle-order assumption in `two_lb_masq_test.go`.
+- `e2e/harness/vm.go` — `WriteFileAtomic` (temp file + fsync + rename) so the
+  geo watcher never observes a partially written fixture.
+- `e2e/harness/traffic.go` — `AddNSAddress`/`RemoveNSAddress`,
+  `CollectBackendIDsFromNSSource` (`curl --interface`) and
+  `AttemptRequestsFromNS` (short-timeout attempts used to observe drops).
+- `e2e/harness/k8s.go` — `CreateLBServiceWithGeos` and `SetAllowedGeos`
+  (annotation update path).
 
 ### 6.3 Ginkgo specs (`e2e/geo_block_test.go`)
 
-Four specs. Each models existing patterns from `one_lb_test.go` and
+The shipped specs are (the text below preserves the original design sketch):
+
+- **Spec 1 — rule order and set shape.** Chain begins with exactly one
+  `geo-deny` rule, followed by DNAT and the final `drop`;
+  `AssertGeoSetExists` confirms a populated `geo_<sn>` set; US traffic still
+  reaches the backend.
+- **Spec 2 — allow/deny and annotation update.** US source allowed; EU source
+  (secondary address `10.44.0.129` on `ns-server`) dropped with the deny
+  counter advancing. Flipping the annotation to `EU` (through the controller
+  `Update` path) reverses both outcomes, proving the allow-list is re-applied
+  without recreating the service.
+- **Spec 3 — hot reload.** Swaps the US and EU rows in the mock fixture via an
+  atomic rename, then waits for the same US source to become blocked. Cleanup
+  restores the canonical fixture and waits for US traffic to flow again.
+- **Spec 4 — per-service isolation.** Two LBs (`US` and `EU`) coexist: each
+  source reaches only its own service, and both services expose populated
+  union sets.
+
+Original sketch follows.
+
+Each spec models existing patterns from `one_lb_test.go` and
 `two_lb_masq_test.go`.
 
 **Spec A — "geo allow-list applied — denied traffic dropped at prerouting"**

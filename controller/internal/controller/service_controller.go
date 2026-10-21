@@ -169,6 +169,8 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 		}
 	}
 
+	geos := AllowedGeos(svc)
+
 	existing, err := r.RouterClient.Get(ctx, serviceKey)
 	if err != nil {
 		if router.IsErrNotFound(err) {
@@ -183,7 +185,7 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 
 	if existing == nil {
 		logger.Info("creating load balancer on router", "service", serviceKey)
-		entry, err := r.RouterClient.Create(ctx, serviceKey, ports)
+		entry, err := r.RouterClient.Create(ctx, serviceKey, ports, geos)
 		if err != nil {
 			if router.IsRetryable(err) {
 				logger.Info("router temporarily unavailable during create, requeueing", "service", serviceKey, "error", err)
@@ -208,9 +210,9 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 		return ctrl.Result{RequeueAfter: targetConvergenceDelay}, nil
 	}
 
-	if portsChanged(existing.Ports, ports) {
+	if portsChanged(existing.Ports, ports) || geosChanged(existing.AllowedGeos, geos) {
 		logger.Info("updating load balancer on router", "service", serviceKey)
-		if err := r.RouterClient.Update(ctx, serviceKey, ports); err != nil {
+		if err := r.RouterClient.Update(ctx, serviceKey, ports, geos); err != nil {
 			if router.IsRetryable(err) {
 				logger.Info("router temporarily unavailable during update, requeueing", "service", serviceKey, "error", err)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -394,6 +396,24 @@ func portsChanged(existing, desired []router.PortMapping) bool {
 			return true
 		}
 		if !destinationsEqual(existing[i].Destinations, desired[i].Destinations) {
+			return true
+		}
+	}
+	return false
+}
+
+// geosChanged compares allow-lists as sets so annotation ordering does not
+// churn the router.
+func geosChanged(existing, desired []string) bool {
+	if len(existing) != len(desired) {
+		return true
+	}
+	have := make(map[string]struct{}, len(existing))
+	for _, cc := range existing {
+		have[cc] = struct{}{}
+	}
+	for _, cc := range desired {
+		if _, ok := have[cc]; !ok {
 			return true
 		}
 	}

@@ -25,6 +25,7 @@ message Destination {
 message CreateLoadBalancerRequest {
   string service_key = 1;
   repeated PortMapping ports = 2;
+  repeated string allowed_geos = 3; // ISO-3166 alpha-2 country codes
 }
 
 message CreateLoadBalancerResponse {
@@ -34,6 +35,7 @@ message CreateLoadBalancerResponse {
 message UpdateLoadBalancerRequest {
   string service_key = 1;
   repeated PortMapping ports = 2;
+  repeated string allowed_geos = 3; // ISO-3166 alpha-2 country codes
 }
 
 message UpdateLoadBalancerResponse {}
@@ -54,6 +56,7 @@ message GetLoadBalancerResponse {
   repeated PortMapping ports = 3;
   bool dhcp_acquired = 4;
   string interface_name = 5;
+  repeated string allowed_geos = 6; // ISO-3166 alpha-2 country codes
 }
 
 message ListLoadBalancersRequest {}

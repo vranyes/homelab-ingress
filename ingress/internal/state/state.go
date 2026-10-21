@@ -37,6 +37,7 @@ type LBService struct {
 	SourceAddress net.IP           `json:"source_address"`
 	SourceMask    net.IPMask       `json:"source_mask,omitempty"`
 	Targets       []LBTarget       `json:"targets"`
+	AllowedGeos   []string         `json:"allowed_geos,omitempty"`
 }
 
 func (s *LBService) String() string {
@@ -67,6 +68,10 @@ func (s *LBService) Clone() *LBService {
 	if s.SourceMask != nil {
 		cpy.SourceMask = make(net.IPMask, len(s.SourceMask))
 		copy(cpy.SourceMask, s.SourceMask)
+	}
+	if s.AllowedGeos != nil {
+		cpy.AllowedGeos = make([]string, len(s.AllowedGeos))
+		copy(cpy.AllowedGeos, s.AllowedGeos)
 	}
 	cpy.Targets = make([]LBTarget, len(s.Targets))
 	for i, t := range s.Targets {

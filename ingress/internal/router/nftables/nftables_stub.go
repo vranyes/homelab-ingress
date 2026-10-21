@@ -4,6 +4,7 @@ package nftables
 
 import (
 	"log/slog"
+	"net"
 
 	"github.com/vranyes/homelab-ingress/ingress/internal/state"
 )
@@ -19,5 +20,7 @@ func (m *Manager) AddRules(svc state.LBService) error {
 }
 
 func (m *Manager) RemoveRules(_ string) error { return nil }
+
+func (m *Manager) RefreshGeoSets(_ map[string][]*net.IPNet) error { return nil }
 
 func (m *Manager) ListRules() ([]string, error) { return nil, nil }

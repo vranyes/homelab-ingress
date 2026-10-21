@@ -3,8 +3,10 @@
 package nftables
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 
@@ -15,9 +17,10 @@ import (
 )
 
 type Manager struct {
-	conn   *nftables.Conn
-	mu     sync.Mutex
-	logger *slog.Logger
+	conn      *nftables.Conn
+	mu        sync.Mutex
+	logger    *slog.Logger
+	geoLookup GeoLookup
 }
 
 func NewManager(logger *slog.Logger, opts ...Option) *Manager {
@@ -114,7 +117,7 @@ func NewManager(logger *slog.Logger, opts ...Option) *Manager {
 		return &Manager{logger: logger}
 	}
 
-	return &Manager{conn: conn, logger: logger}
+	return &Manager{conn: conn, logger: logger, geoLookup: o.geoLookup}
 }
 
 func (m *Manager) ListRules() ([]string, error) {
@@ -192,7 +195,55 @@ func (m *Manager) AddRules(service state.LBService) error {
 		m.conn.FlushChain(pc)
 	}
 
+	rules, err := m.planRules(m.conn, m.conn, table, pc, service)
+	if err != nil {
+		return err
+	}
+	for _, rule := range rules {
+		m.conn.AddRule(rule)
+	}
+
+	m.logger.Info("firewall rules updated, flushing", "service", service.ServiceName)
+	return m.conn.Flush()
+}
+
+// planRules builds the ordered rule set for a service:
+//
+//  1. geo deny (only when AllowedGeos is non-empty) — must precede DNAT,
+//  2. one DNAT rule per port mapping,
+//  3. the final daddr drop.
+//
+// It is separated from AddRules so tests can assert ordering without parsing
+// netlink messages.
+func (m *Manager) planRules(c *nftables.Conn, ss setStore, table *nftables.Table, chain *nftables.Chain, service state.LBService) ([]*nftables.Rule, error) {
+	sn := safeName(service.ServiceName)
 	extIP := service.SourceAddress
+	var rules []*nftables.Rule
+
+	if len(service.AllowedGeos) > 0 {
+		if m.geoLookup == nil {
+			return nil, fmt.Errorf("service %s has allowed_geos but no geo database is configured", service.ServiceName)
+		}
+		var cidrs []*net.IPNet
+		for _, cc := range service.AllowedGeos {
+			nets, ok := m.geoLookup(cc)
+			if !ok {
+				m.logger.Warn("no CIDRs for allowed country", "service", service.ServiceName, "country", cc)
+				continue
+			}
+			cidrs = append(cidrs, nets...)
+		}
+		set, err := buildGeoUnionSet(ss, table, sn, cidrs)
+		if err != nil {
+			return nil, fmt.Errorf("build geo set: %w", err)
+		}
+		rules = append(rules, &nftables.Rule{
+			Table: table,
+			Chain: chain,
+			Exprs: buildGeoSetDenyExprs(extIP, set),
+		})
+	}
+
 	for _, target := range service.Targets {
 		var mapping = make(map[string]uint16, len(target.Dst))
 		for _, d := range target.Dst {
@@ -200,21 +251,21 @@ func (m *Manager) AddRules(service state.LBService) error {
 		}
 
 		expr, err := buildRoundRobinExprs(
-			m.conn, sn, pc.Table, extIP, target.Protocol, target.SrcPort, mapping,
+			c, sn, table, extIP, target.Protocol, target.SrcPort, mapping,
 		)
 		if err != nil {
-			return fmt.Errorf("build round robin exprs: %w", err)
+			return nil, fmt.Errorf("build round robin exprs: %w", err)
 		}
-		m.conn.AddRule(&nftables.Rule{
+		rules = append(rules, &nftables.Rule{
 			Table: table,
-			Chain: pc,
+			Chain: chain,
 			Exprs: expr,
 		})
 	}
 
-	m.conn.AddRule(&nftables.Rule{
+	rules = append(rules, &nftables.Rule{
 		Table: table,
-		Chain: pc,
+		Chain: chain,
 		Exprs: []expr.Any{
 			&expr.Payload{
 				DestRegister: 0x1,
@@ -231,8 +282,44 @@ func (m *Manager) AddRules(service state.LBService) error {
 			&expr.Verdict{Kind: expr.VerdictDrop},
 		}})
 
-	m.logger.Info("firewall rules updated, flushing", "service", service.ServiceName)
+	return rules, nil
+}
+
+// RefreshGeoSets flushes and repopulates the per-service union sets after a
+// MaxMind reload (ADR 0004). Rules referencing a set by SetID stay valid across
+// FlushSet, so no chain rebuild is needed.
+func (m *Manager) RefreshGeoSets(svcCIDRs map[string][]*net.IPNet) error {
+	if m.conn == nil {
+		return fmt.Errorf("nftables connection not available")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	table, err := m.findTable()
+	if err != nil {
+		if errors.Is(err, errTableNotFound) {
+			// Geo can reload before the first service has created the table.
+			// The next service add builds its set from the current cache.
+			return nil
+		}
+		return fmt.Errorf("find table: %w", err)
+	}
+	if err := m.refreshGeoSets(m.conn, table, svcCIDRs); err != nil {
+		return err
+	}
 	return m.conn.Flush()
+}
+
+// refreshGeoSets is the testable half of RefreshGeoSets: it performs set
+// operations only and leaves the flush to the caller.
+func (m *Manager) refreshGeoSets(ss setStore, table *nftables.Table, svcCIDRs map[string][]*net.IPNet) error {
+	for serviceKey, cidrs := range svcCIDRs {
+		if _, err := buildGeoUnionSet(ss, table, safeName(serviceKey), cidrs); err != nil {
+			return fmt.Errorf("refresh geo set for %s: %w", serviceKey, err)
+		}
+	}
+	return nil
 }
 
 // RemoveRules removes the chain and any associated LB map for serviceKey.
@@ -304,7 +391,7 @@ func (m *Manager) findTable() (*nftables.Table, error) {
 			return t, nil
 		}
 	}
-	return nil, fmt.Errorf("table %s not found", tableName)
+	return nil, fmt.Errorf("table %s not found: %w", tableName, errTableNotFound)
 }
 
 func (m *Manager) findChain(table *nftables.Table, name string) (*nftables.Chain, error) {

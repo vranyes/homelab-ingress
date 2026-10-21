@@ -219,3 +219,24 @@ func TestParseMAC_RoundTrip(t *testing.T) {
 		t.Fatalf("expected lb-foo, got %q", name)
 	}
 }
+
+func TestCloneCopiesAllowedGeos(t *testing.T) {
+	svc := svcWithAddr("ns/svc", "10.44.0.50")
+	svc.AllowedGeos = []string{"US", "CA"}
+
+	clone := svc.Clone()
+	if len(clone.AllowedGeos) != 2 || clone.AllowedGeos[0] != "US" || clone.AllowedGeos[1] != "CA" {
+		t.Fatalf("clone allowed geos = %v", clone.AllowedGeos)
+	}
+
+	clone.AllowedGeos[0] = "EU"
+	if svc.AllowedGeos[0] != "US" {
+		t.Fatalf("clone shares backing array with original: %v", svc.AllowedGeos)
+	}
+
+	// A nil slice must stay nil so the JSON omitempty tag keeps old state files
+	// byte-identical.
+	if got := (&LBService{ServiceName: "x"}).Clone(); got.AllowedGeos != nil {
+		t.Fatalf("nil allowed geos became %v", got.AllowedGeos)
+	}
+}

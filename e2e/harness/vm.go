@@ -53,6 +53,41 @@ func WriteFile(path string, contents []byte, mode os.FileMode) error {
 	return os.WriteFile(path, contents, mode)
 }
 
+// WriteFileAtomic writes via a temp file in the same directory and renames it
+// over `path`, so a concurrent reader (the geo file watcher) never observes a
+// partial fixture.
+func WriteFileAtomic(path string, contents []byte, mode os.FileMode) error {
+	dir := dirOf(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir parent of %s: %w", path, err)
+	}
+	f, err := os.CreateTemp(dir, ".hl-write-*")
+	if err != nil {
+		return fmt.Errorf("create temp file for %s: %w", path, err)
+	}
+	tmp := f.Name()
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}()
+	if _, err := f.Write(contents); err != nil {
+		return fmt.Errorf("write temp file for %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync temp file for %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close temp file for %s: %w", path, err)
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		return fmt.Errorf("chmod temp file for %s: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename temp file over %s: %w", path, err)
+	}
+	return nil
+}
+
 // ReadFile reads the contents of `path`.
 func ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
@@ -81,6 +116,25 @@ func dirOf(path string) string {
 		return path[:i]
 	}
 	return "."
+}
+
+// ResetDHCPLeases empties dnsmasq's lease database and restarts the in-netns
+// unit. Kept VMs accumulate leases when a run is interrupted (the daemon is
+// killed before it can send DHCPRELEASE); after enough runs the 91-address
+// pool is exhausted and dnsmasq answers every DISCOVER with "no address
+// available". dnsmasq dumps its in-memory leases on SIGTERM, so the file must
+// be truncated while the service is stopped.
+func ResetDHCPLeases(ctx context.Context) error {
+	const script = `set -e
+rc-service hl-dnsmasq-ns stop
+: > /var/lib/misc/dnsmasq.leases
+rc-service hl-dnsmasq-ns start
+`
+	out, err := RunShell(ctx, script)
+	if err != nil {
+		return fmt.Errorf("reset dnsmasq leases: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // EnsureVepaRelayUp is the e2e suite's preflight check for the VEPA hairpin

@@ -23,10 +23,38 @@ import (
 // harness a type-safe way to construct a config file from scratch.
 type IngressConfig struct {
 	BaseInterface string           `yaml:"base_interface"`
-	GRPC          IngressGRPC       `yaml:"grpc"`
-	WS            IngressWS         `yaml:"ws"`
-	Auth          IngressAuth       `yaml:"auth"`
-	Masquerade    []MasqueradeRule  `yaml:"masquerade,omitempty"`
+	GRPC          IngressGRPC      `yaml:"grpc"`
+	WS            IngressWS        `yaml:"ws"`
+	Auth          IngressAuth      `yaml:"auth"`
+	Masquerade    []MasqueradeRule `yaml:"masquerade,omitempty"`
+	GeoIP         *IngressGeoIP    `yaml:"geoip,omitempty"`
+}
+
+// MockGeoPath is the TSV fixture written by e2e-vm/scripts/03-geolite-mock.sh
+// and re-written by the suite before ingress starts.
+const MockGeoPath = "/var/lib/homelab-ingress/mock-geo.tsv"
+
+// IngressGeoIP mirrors the geoip block of the ingress config. Durations stay
+// strings so the YAML matches what an operator would write.
+type IngressGeoIP struct {
+	Provider        string `yaml:"provider"`
+	LicenseKey      string `yaml:"license_key,omitempty"`
+	Edition         string `yaml:"edition,omitempty"`
+	DownloadURL     string `yaml:"download_url,omitempty"`
+	RefreshInterval string `yaml:"refresh_interval,omitempty"`
+	CachePath       string `yaml:"cache_path"`
+	StaleAfter      string `yaml:"stale_after,omitempty"`
+}
+
+// DefaultGeoFixture maps the four /26 slices of the e2e bridge subnet to
+// countries. 10.44.0.0/26 (which contains the bridge and ns-server addresses)
+// is US; 10.44.0.128/26 (the secondary source address) is EU.
+func DefaultGeoFixture() string {
+	return "# cidr\tcountry\n" +
+		"10.44.0.0/26\tUS\n" +
+		"10.44.0.64/26\tCA\n" +
+		"10.44.0.128/26\tEU\n" +
+		"10.44.0.192/26\tXX\n"
 }
 
 // IngressGRPC is the listen address for the gRPC server.
@@ -67,6 +95,12 @@ func DefaultIngressConfig() IngressConfig {
 			Issuer:          "http://127.0.0.1:8080",
 			Audience:        "homelab-ingress",
 			AllowedSubjects: []string{"system:serviceaccount:default:homelab-ingress-controller"},
+		},
+		GeoIP: &IngressGeoIP{
+			Provider:        "mock",
+			RefreshInterval: "24h",
+			CachePath:       MockGeoPath,
+			StaleAfter:      "168h",
 		},
 	}
 }

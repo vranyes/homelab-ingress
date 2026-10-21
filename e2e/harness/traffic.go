@@ -147,6 +147,17 @@ var curlInNS = func(ctx context.Context, ns string, args ...string) ([]byte, err
 // Requests issued from the VEPA peer namespace arrive over the bridge and do
 // traverse those chains.
 func CollectBackendIDsFromNS(ctx context.Context, ns, lbAddr string, n int, timeout time.Duration) ([]string, error) {
+	return collectBackendIDsFromNS(ctx, ns, "", lbAddr, n, timeout)
+}
+
+// CollectBackendIDsFromNSSource is CollectBackendIDsFromNS with the client
+// bound to a specific source address (curl --interface). It is used to send
+// traffic that the mock geo database maps to a different country.
+func CollectBackendIDsFromNSSource(ctx context.Context, ns, sourceIP, lbAddr string, n int, timeout time.Duration) ([]string, error) {
+	return collectBackendIDsFromNS(ctx, ns, sourceIP, lbAddr, n, timeout)
+}
+
+func collectBackendIDsFromNS(ctx context.Context, ns, sourceIP, lbAddr string, n int, timeout time.Duration) ([]string, error) {
 	url := "http://" + lbAddr + "/"
 	ids := make([]string, 0, n)
 	var firstErr error
@@ -163,7 +174,11 @@ func CollectBackendIDsFromNS(ctx context.Context, ns, lbAddr string, n int, time
 			return ids, fmt.Errorf("collecting backend ids from %s (ns %s) timed out after %s: collected %d/%d; first error: %v",
 				url, ns, timeout, len(ids), n, firstErr)
 		}
-		out, err := curlInNS(ctx, ns, "-sS", "-m", "5", "-w", statusMarker+"%{http_code}", url)
+		args := []string{"-sS", "-m", "5", "-w", statusMarker + "%{http_code}"}
+		if sourceIP != "" {
+			args = append(args, "--interface", sourceIP)
+		}
+		out, err := curlInNS(ctx, ns, append(args, url)...)
 		if err != nil {
 			fail("request %d: %w: %s", i+1, err, bodySnippet(out))
 			continue
@@ -185,6 +200,55 @@ func CollectBackendIDsFromNS(ctx context.Context, ns, lbAddr string, n int, time
 		return ids, fmt.Errorf("%d/%d requests to %s (ns %s) failed; first error: %w", failures, n, url, ns, firstErr)
 	}
 	return ids, nil
+}
+
+// AttemptRequestsFromNS fires `n` short GETs from the namespace, optionally
+// bound to sourceIP, and reports how many completed. A dropped SYN makes curl
+// exit non-zero; that is the expected signal for geo-blocked traffic.
+func AttemptRequestsFromNS(ctx context.Context, ns, sourceIP, lbAddr string, n int, perRequest time.Duration) (attempted, succeeded int, firstErr error) {
+	url := "http://" + lbAddr + "/"
+	if perRequest <= 0 {
+		perRequest = time.Second
+	}
+	for i := 0; i < n; i++ {
+		args := []string{"-sS", "-o", "/dev/null", "-m", fmt.Sprintf("%g", perRequest.Seconds())}
+		if sourceIP != "" {
+			args = append(args, "--interface", sourceIP)
+		}
+		out, err := curlInNS(ctx, ns, append(args, url)...)
+		attempted++
+		if err == nil {
+			succeeded++
+			continue
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("request %d: %w: %s", i+1, err, bodySnippet(out))
+		}
+	}
+	return attempted, succeeded, firstErr
+}
+
+// AddNSAddress idempotently assigns an address inside a namespace.
+func AddNSAddress(ctx context.Context, ns, dev, cidr string) error {
+	out, err := RunShell(ctx, fmt.Sprintf("ip -n %s addr replace %s dev %s", ns, cidr, dev))
+	if err != nil {
+		return fmt.Errorf("add %s to %s in %s: %w: %s", cidr, dev, ns, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// RemoveNSAddress removes an address from a namespace. A missing address is
+// not treated as an error (cleanup must be idempotent).
+func RemoveNSAddress(ctx context.Context, ns, dev, cidr string) error {
+	out, err := RunShell(ctx, fmt.Sprintf("ip -n %s addr del %s dev %s", ns, cidr, dev))
+	if err != nil {
+		msg := string(out)
+		if strings.Contains(msg, "Cannot assign requested address") || strings.Contains(msg, "RTNETLINK answers: No such") {
+			return nil
+		}
+		return fmt.Errorf("remove %s from %s in %s: %w: %s", cidr, dev, ns, err, strings.TrimSpace(msg))
+	}
+	return nil
 }
 
 // splitCurlStatus splits curl's -w output into the response body and the HTTP

@@ -25,3 +25,23 @@ ws:
 #     output_device: br-lan.20
 #   - input_device: br-lan.30
 #     output_device: br-lan.40
+
+# Geo-blocking (optional). With a provider set, the daemon downloads and
+# refreshes a country database, then enforces each LoadBalancer Service's
+# homelab-ingress.vranyes.com/allowed-geos annotation (e.g. "US,CA").
+# Providers: "dbip" (free, no key; data by DB-IP, https://db-ip.com, CC BY 4.0),
+# "maxmind" (GeoLite2; requires a license key), or "mock" (e2e fixture).
+# Without this block, Services must not set allowed-geos.
+# geoip:
+#   provider: dbip
+#   refresh_interval: 24h
+#   stale_after: 840h
+#   # Defaults to <state-dir>/dbip-country-lite.mmdb.
+#   # cache_path: /var/lib/homelab-ingress/dbip-country-lite.mmdb
+#
+# For MaxMind instead:
+# geoip:
+#   provider: maxmind
+#   license_key: YOUR_MAXMIND_LICENSE_KEY
+#   edition: GeoLite2-Country
+#   stale_after: 168h

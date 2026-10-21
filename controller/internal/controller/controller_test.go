@@ -44,28 +44,37 @@ func otherClass() *string      { return strptr("other-class") }
 // stubRouter is a fake router.Client. NotFound on Get drives the
 // create branch; cannedIP is handed out on Create.
 type stubRouter struct {
-	entries     map[string]*router.ServiceEntry
-	cannedIP    string
-	createCalls []string
-	updateCalls []string
-	deleteCalls []string
+	entries        map[string]*router.ServiceEntry
+	cannedIP       string
+	createCalls    []string
+	updateCalls    []string
+	deleteCalls    []string
+	lastCreateGeos []string
+	lastUpdateGeos []string
+	updateErr      error
 }
 
 func newStubRouter(ip string) *stubRouter {
 	return &stubRouter{entries: map[string]*router.ServiceEntry{}, cannedIP: ip}
 }
 
-func (s *stubRouter) Create(_ context.Context, key string, ports []router.PortMapping) (*router.ServiceEntry, error) {
+func (s *stubRouter) Create(_ context.Context, key string, ports []router.PortMapping, geos []string) (*router.ServiceEntry, error) {
 	s.createCalls = append(s.createCalls, key)
-	e := &router.ServiceEntry{ServiceKey: key, AssignedIP: s.cannedIP, Ports: ports}
+	s.lastCreateGeos = append([]string(nil), geos...)
+	e := &router.ServiceEntry{ServiceKey: key, AssignedIP: s.cannedIP, Ports: ports, AllowedGeos: geos}
 	s.entries[key] = e
 	return e, nil
 }
 
-func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMapping) error {
+func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMapping, geos []string) error {
 	s.updateCalls = append(s.updateCalls, key)
+	s.lastUpdateGeos = append([]string(nil), geos...)
+	if s.updateErr != nil {
+		return s.updateErr
+	}
 	if e, ok := s.entries[key]; ok {
 		e.Ports = ports
+		e.AllowedGeos = geos
 	}
 	return nil
 }
@@ -385,5 +394,114 @@ func TestReconcile_DeleteFlow(t *testing.T) {
 	// With the finalizer removed, the terminating object is gone.
 	if err := cl.Get(testCtx(), types.NamespacedName{Namespace: "ns", Name: "web"}, &corev1.Service{}); err == nil {
 		t.Fatalf("expected terminating service to be deleted after finalizer removal")
+	}
+}
+
+func TestAllowedGeosAnnotation(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"missing", "", nil},
+		{"single", "US", []string{"US"}},
+		{"trims, uppercases and dedupes", " us , ca,US ", []string{"US", "CA"}},
+		{"drops invalid entries", "US,USA,,1X", []string{"US"}},
+		{"all invalid", "USA,nope", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &corev1.Service{}
+			if tc.raw != "" {
+				svc.Annotations = map[string]string{AnnotationAllowedGeos: tc.raw}
+			}
+			got := AllowedGeos(svc)
+			if len(got) != len(tc.want) {
+				t.Fatalf("AllowedGeos(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("AllowedGeos(%q) = %v, want %v", tc.raw, got, tc.want)
+				}
+			}
+		})
+	}
+
+	if got := AllowedGeos(nil); got != nil {
+		t.Fatalf("nil service = %v", got)
+	}
+}
+
+func TestGeosChanged(t *testing.T) {
+	if geosChanged(nil, nil) {
+		t.Fatal("nil vs nil must be unchanged")
+	}
+	if geosChanged([]string{"US", "CA"}, []string{"CA", "US"}) {
+		t.Fatal("order-only difference must be unchanged")
+	}
+	if !geosChanged([]string{"US"}, []string{"US", "CA"}) {
+		t.Fatal("added country must be a change")
+	}
+	if !geosChanged([]string{"US", "CA"}, []string{"US"}) {
+		t.Fatal("removed country must be a change")
+	}
+	if !geosChanged(nil, []string{"US"}) {
+		t.Fatal("nil to non-empty must be a change")
+	}
+	if !geosChanged([]string{"US"}, nil) {
+		t.Fatal("non-empty to nil must be a change")
+	}
+}
+
+func TestReconcile_ForwardsGeos(t *testing.T) {
+	rt := newStubRouter("10.44.0.50")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+		lbService("ns", "web", func(s *corev1.Service) {
+			s.Annotations = map[string]string{AnnotationAllowedGeos: "us, ca"}
+		}),
+		endpointSlice("ns", "web-a", "web", "http", 8080, true, "10.0.0.1"),
+	).WithStatusSubresource(&corev1.Service{}).Build()
+	r := &ServiceReconciler{Client: cl, RouterClient: rt}
+
+	reconcile := func() {
+		t.Helper()
+		if _, err := r.Reconcile(testCtx(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "ns", Name: "web"},
+		}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+
+	reconcile()
+	if len(rt.createCalls) != 1 {
+		t.Fatalf("create calls = %v", rt.createCalls)
+	}
+	if len(rt.lastCreateGeos) != 2 || rt.lastCreateGeos[0] != "US" || rt.lastCreateGeos[1] != "CA" {
+		t.Fatalf("create geos = %v", rt.lastCreateGeos)
+	}
+
+	// Changing only the annotation must trigger an update carrying the new set.
+	svc := getSvc(t, cl)
+	svc.Annotations[AnnotationAllowedGeos] = "EU"
+	if err := cl.Update(testCtx(), svc); err != nil {
+		t.Fatalf("update annotation: %v", err)
+	}
+	reconcile()
+	if len(rt.updateCalls) != 1 {
+		t.Fatalf("update calls = %v", rt.updateCalls)
+	}
+	if len(rt.lastUpdateGeos) != 1 || rt.lastUpdateGeos[0] != "EU" {
+		t.Fatalf("update geos = %v", rt.lastUpdateGeos)
+	}
+
+	// An annotation that normalises to the same set must not churn the router.
+	svc = getSvc(t, cl)
+	svc.Annotations[AnnotationAllowedGeos] = "eu"
+	if err := cl.Update(testCtx(), svc); err != nil {
+		t.Fatalf("update annotation: %v", err)
+	}
+	reconcile()
+	if len(rt.updateCalls) != 1 {
+		t.Fatalf("no-op annotation triggered another update: %v", rt.updateCalls)
 	}
 }

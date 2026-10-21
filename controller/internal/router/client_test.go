@@ -39,11 +39,15 @@ type fakeServer struct {
 	createCalls []string
 	updateCalls []string
 	deleteCalls []string
+	createGeos  map[string][]string
+	updateGeos  map[string][]string
 }
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{
-		services: make(map[string]*routerv1.GetLoadBalancerResponse),
+		services:   make(map[string]*routerv1.GetLoadBalancerResponse),
+		createGeos: make(map[string][]string),
+		updateGeos: make(map[string][]string),
 	}
 }
 
@@ -51,6 +55,7 @@ func (f *fakeServer) CreateLoadBalancer(_ context.Context, req *routerv1.CreateL
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createCalls = append(f.createCalls, req.ServiceKey)
+	f.createGeos[req.ServiceKey] = append([]string(nil), req.AllowedGeos...)
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -58,6 +63,7 @@ func (f *fakeServer) CreateLoadBalancer(_ context.Context, req *routerv1.CreateL
 		ServiceKey:    req.ServiceKey,
 		AssignedIp:    "192.168.1.100",
 		Ports:         req.Ports,
+		AllowedGeos:   req.AllowedGeos,
 		DhcpAcquired:  false,
 		InterfaceName: "lb-" + req.ServiceKey,
 	}
@@ -68,11 +74,13 @@ func (f *fakeServer) UpdateLoadBalancer(_ context.Context, req *routerv1.UpdateL
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updateCalls = append(f.updateCalls, req.ServiceKey)
+	f.updateGeos[req.ServiceKey] = append([]string(nil), req.AllowedGeos...)
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
 	if svc, ok := f.services[req.ServiceKey]; ok {
 		svc.Ports = req.Ports
+		svc.AllowedGeos = req.AllowedGeos
 	}
 	return &routerv1.UpdateLoadBalancerResponse{}, nil
 }
@@ -136,12 +144,12 @@ func generateTestCert(t *testing.T) (*tls.Config, []byte) {
 	}
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	caTmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "Test CA"},
-		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:         true,
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
@@ -245,12 +253,18 @@ func TestClient_Create(t *testing.T) {
 		ports := []PortMapping{
 			{Protocol: "tcp", ExternalPort: 80, Destinations: []Destination{{Addr: "10.42.0.10", Port: 8080}}},
 		}
-		entry, err := client.Create(context.Background(), "default/myapp", ports)
+		entry, err := client.Create(context.Background(), "default/myapp", ports, []string{"US", "CA"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if entry.AssignedIP != "192.168.1.100" {
 			t.Errorf("expected IP 192.168.1.100, got %q", entry.AssignedIP)
+		}
+		if len(entry.AllowedGeos) != 2 || entry.AllowedGeos[0] != "US" || entry.AllowedGeos[1] != "CA" {
+			t.Errorf("entry geos = %v", entry.AllowedGeos)
+		}
+		if got := fake.createGeos["default/myapp"]; len(got) != 2 || got[0] != "US" || got[1] != "CA" {
+			t.Errorf("request geos = %v", got)
 		}
 		if len(fake.createCalls) != 1 || fake.createCalls[0] != "default/myapp" {
 			t.Errorf("expected create call for default/myapp")
@@ -261,7 +275,7 @@ func TestClient_Create(t *testing.T) {
 		fake.createErr = fmt.Errorf("router down")
 		defer func() { fake.createErr = nil }()
 
-		_, err := client.Create(context.Background(), "default/fail", nil)
+		_, err := client.Create(context.Background(), "default/fail", nil, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -289,9 +303,12 @@ func TestClient_Update(t *testing.T) {
 		ports := []PortMapping{
 			{Protocol: "tcp", ExternalPort: 443, Destinations: []Destination{{Addr: "10.42.0.10", Port: 8443}, {Addr: "10.42.0.11", Port: 8443}}},
 		}
-		err := client.Update(context.Background(), "default/myapp", ports)
+		err := client.Update(context.Background(), "default/myapp", ports, []string{"EU"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := fake.updateGeos["default/myapp"]; len(got) != 1 || got[0] != "EU" {
+			t.Errorf("update geos = %v", got)
 		}
 		if len(fake.updateCalls) != 1 || fake.updateCalls[0] != "default/myapp" {
 			t.Errorf("expected update call")
@@ -302,7 +319,7 @@ func TestClient_Update(t *testing.T) {
 		fake.updateErr = fmt.Errorf("router down")
 		defer func() { fake.updateErr = nil }()
 
-		err := client.Update(context.Background(), "default/fail", nil)
+		err := client.Update(context.Background(), "default/fail", nil, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -359,8 +376,8 @@ func TestClient_Get(t *testing.T) {
 			}}},
 		DhcpAcquired:  true,
 		InterfaceName: "lb-default-myapp",
+		AllowedGeos:   []string{"US"},
 	}
-
 	t.Run("gets existing service", func(t *testing.T) {
 		entry, err := client.Get(context.Background(), "default/myapp")
 		if err != nil {
@@ -374,6 +391,9 @@ func TestClient_Get(t *testing.T) {
 		}
 		if len(entry.Ports) != 1 || entry.Ports[0].Destinations[0].Port != 8443 {
 			t.Errorf("port mismatch: %+v", entry.Ports)
+		}
+		if len(entry.AllowedGeos) != 1 || entry.AllowedGeos[0] != "US" {
+			t.Errorf("geos mismatch: %+v", entry.AllowedGeos)
 		}
 	})
 

@@ -33,7 +33,7 @@ else
   HASH_CMD = shasum -a 256
 endif
 
-.PHONY: help test test-unit \
+.PHONY: help test test-unit proto \
         start-e2e-vm remove-e2e-vm ensure-e2e-vm copy-e2e-vm \
         build-e2e-binaries clean-e2e-binaries \
         test-e2e test-e2e-down test-e2e-bringup test-e2e-shell
@@ -65,14 +65,23 @@ clean-e2e-binaries:
 
 test: test-unit test-e2e ## Run unit tests, then e2e suite
 
+.PHONY: proto
+proto: ## Regenerate the router gRPC bindings (needs protoc + Go plugins)
+	@echo "==> Regenerating proto bindings"
+	cd proto && PATH="$$(go env GOPATH)/bin:$$PATH" protoc \
+		--go_out=../ingress/pkg/api --go_opt=paths=source_relative \
+		--go-grpc_out=../ingress/pkg/api --go-grpc_opt=paths=source_relative \
+		router/v1/router.proto
+	cp ingress/pkg/api/router/v1/router.pb.go ingress/pkg/api/router/v1/router_grpc.pb.go controller/pkg/api/router/v1/
+
 test-unit: ## Run unit tests in ingress + controller modules
 	@echo "==> Running ingress unit tests ($(UNAME_S))"
 ifeq ($(UNAME_S),Linux)
 	cd ingress && go test ./internal/... -cover -v
 else
-	cd ingress && go test ./internal/config/... ./internal/macvlan/... -cover -v
+	cd ingress && go test ./internal/config/... ./internal/macvlan/... ./internal/state/... ./internal/service/... ./internal/geo/... ./internal/geoip/... -cover -v
 endif
-	@echo "==> Running controller unit tests ($(UNAME_S))"
+	@echo "==> Running controller unit tests"
 	cd controller && go test ./internal/... -cover -v
 
 # ------------------------------------------------------------------
