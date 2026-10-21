@@ -21,8 +21,9 @@ type RouterServer struct {
 	stateData         *state.State
 	logger            *slog.Logger
 	ActiveMacvlanFunc func() int32
-	// GeoEnabled is set when a MaxMind database is configured. Requests that
-	// carry allowed_geos are rejected while it is false (ADR 0003).
+	// GeoEnabled is set when a country database is configured (MaxMind,
+	// DB-IP or the e2e mock). Requests that carry allowed_geos are rejected
+	// while it is false (ADR 0003, ADR 0006).
 	GeoEnabled bool
 }
 
