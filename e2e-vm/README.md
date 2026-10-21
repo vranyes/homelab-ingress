@@ -30,6 +30,15 @@ qemu (x86_64, 4 vCPU, 4GiB RAM, 30GiB disk)
                               filter: match all → action mirred egress mirror self
 ```
 
+## Geo mock database
+
+`scripts/03-geolite-mock.sh` writes
+`/var/lib/homelab-ingress/mock-geo.tsv`, a deterministic IP→country fixture
+used when the ingress config selects `geoip.provider: mock`. It maps the bridge
+subnet's four `/26` slices to US, CA, EU and XX. The suite rewrites the file in
+`BeforeSuite`, and geo specs that need an EU-mapped source add the secondary
+address `10.44.0.129/24` to `veth-outer` inside `ns-server`.
+
 ## VEPA hairpin relay
 
 The ingress daemon creates each `lb-*` interface in **macvlan VEPA mode**

@@ -1,7 +1,7 @@
 # ADR 0002: Mock CIDR carve-up and ns-external veth topology
 
-**Status:** Accepted  
-**Date:** 2026-08-06  
+**Status:** Accepted; EU-source topology superseded by ADR 0005 (the four-way CIDR carve-up still applies)
+**Date:** 2026-08-06
 **Grills:** #2 (ns-external route unreachable), #2a (127.0.0.0/8 loopback dropped by kernel)
 
 ## Context

@@ -108,20 +108,21 @@ e2e/
 ├── suite_test.go                             Ginkgo entry; BeforeSuite/AfterSuite wiring
 ├── suite_helpers_test.go                     small helpers shared across scenarios
 ├── zero_lb_test.go, one_lb_test.go, ...      scenario files (all in package e2e_test)
+├── geo_block_test.go                         country allow-list, annotation flip, hot reload, isolation
 ├── cmd/
 │   └── oidc-mock/main.go                     mock OIDC provider (RS256, embedded PEM)
 └── harness/                                  helpers imported by scenarios
-    ├── vm.go                                 shell helpers, file IO
+    ├── vm.go                                 shell helpers, file IO, atomic writes, dnsmasq lease reset
     ├── process.go                            Spawn / ManagedProcess lifecycle
-    ├── k8s.go                                controller-runtime client + Service/Deployment factories
+    ├── k8s.go                                k8s client, Service/Deployment factories, CreateLBServiceWithGeos / SetAllowedGeos
     ├── backends.go                           DeployBackend / TearDownBackend wrappers
     ├── backends_wait.go                      WaitForBackendReady (fail fast on ImagePullBackOff)
     ├── oidc.go                               MintToken / WaitForOidc
     ├── token.go                              WriteToken / MutateToken / BadAudienceToken
     ├── ingress.go                            IngressConfig marshalling + WaitForIngress
     ├── controller.go                         WaitForControllerReady (log + process liveness)
-    ├── traffic.go                            CollectBackendIDsFromNS (traffic via ns-server) / CollectBackendIDsFreshConn / AssertAllHit / AssertRoughlyUniform
-    ├── nft.go                                (#linux) LBChains / AssertNoLBChains / AssertLBChainExists
+    ├── traffic.go                            CollectBackendIDsFromNS / source-bound and attempt helpers / AssertAllHit / AssertRoughlyUniform
+    ├── nft.go                                (#linux) LBChains / AssertNoLBChains / AssertLBChainExists / GetGeoSet / ClassifyRules
     └── log.go                                TailFile / GrepFile / WaitForLogMatch
 ```
 

@@ -20,3 +20,24 @@ Layout
 
 Notes
 - Uses `sigs.k8s.io/controller-runtime` and supports leader election when running in-cluster.
+
+Geo-blocking
+- Set the annotation on a Service that uses the homelab-ingress class:
+
+  ```yaml
+  metadata:
+    annotations:
+      homelab-ingress.vranyes.com/allowed-geos: "US,CA"
+  ```
+
+- The controller parses comma-separated ISO-3166 alpha-2 codes (trim, uppercase,
+  de-duplicate, drop invalid), forwards them as `allowed_geos` on
+  `CreateLoadBalancer`/`UpdateLoadBalancer`, and compares them as a set on every
+  reconcile. Annotation edits are applied without recreating the load balancer.
+- `GetLoadBalancer`/`ListLoadBalancers` return the router's current list, which
+  the controller uses for drift detection.
+- An absent or empty annotation means allow all. There is no CRD and no extra
+  RBAC/env: the existing Service watch is sufficient.
+- The ingress daemon resolves countries to CIDRs; the controller never handles
+  IP ranges. If the daemon has no `geoip.provider` configured, a non-empty list
+  fails with `InvalidArgument` and the Service does not receive a status IP.

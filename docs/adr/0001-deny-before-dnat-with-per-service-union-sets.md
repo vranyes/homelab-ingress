@@ -6,7 +6,7 @@
 
 ## Context
 
-The original plan (§4.6) placed `ip saddr @geo_<cc> counter accept` rules before the DNAT rules. In nftables a nat-prerouting `accept` verdict terminates chain evaluation; the matching packet never reaches the DNAT rules. This inverts the policy:
+The original implementation plan (preserved in git history) placed `ip saddr @geo_<cc> counter accept` rules before the DNAT rules. In nftables a nat-prerouting `accept` verdict terminates chain evaluation; the matching packet never reaches the DNAT rules. This inverts the policy:
 
 - Allowed-country traffic is `accept`ed before DNAT → no DNAT → packet routed locally to the macvlan child IP (INPUT) → no listener → broken.
 - Disallowed-country traffic falls through to the DNAT rule (which has no source predicate) → DNAT'd → forwarded to backend → allowed.

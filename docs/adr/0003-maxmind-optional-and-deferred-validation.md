@@ -39,7 +39,7 @@ no-op is unreachable if the daemon refuses to start.
   return pattern.
 - **The startup validation block** in §4.1 no longer contains a hard
   error on missing license_key; it falls through to a no-op state.
-- **e2e harness** always sets `maxmind.license_key: "mock"`, so the
+- **e2e harness** always sets `geoip.provider: "mock"`, so the
   test environment never exercises the "no MaxMind" path. That path is
   exercised implicitly by all existing (pre-geo) e2e specs, which send
   no `allowed_geos` and thus never hit the validation.

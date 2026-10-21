@@ -4,7 +4,8 @@ The `ingress` module is a Linux system service that provides declarative, event-
 ingress routing.
 It receives service definitions via a gRPC API and automatically provisions macvlan
 interfaces, obtains IP addresses via DHCP, and configures nftables DNAT rules to
-forward traffic to backend targets.
+forward traffic to backend targets. Optional per-Service country allow-lists are
+enforced at prerouting, before DNAT.
 
 ## Architecture
 
@@ -104,7 +105,9 @@ type Implementor interface {
   removes on Delete
 - `Reconcile(st)` — compares actual nftables rules against desired state, adds missing
   rules and removes extraneous ones
-- Reconciles every 30 seconds
+- `RefreshGeoSets(svcCIDRs)` — flushes and repopulates the per-service geo union sets
+  after a country-database reload (no chain rebuild)
+- Reconciles every 5 minutes
 
 **nftables implementation** (`internal/router/nftables/`):
 
@@ -114,6 +117,33 @@ type Implementor interface {
 - **Forward chain** (forward, filter): accepts post-DNAT traffic to pod IPs/ports
 - **Postrouting chain**: masquerades outbound traffic
 - Supports single-destination DNAT and round-robin load balancing via nftables sets/maps
+
+### Geo-blocking (`internal/geoip/` and `internal/geo/`)
+
+`geoip.Manager` owns a country database and refreshes it in-process:
+
+- `provider: dbip` — free DB-IP IP-to-Country Lite MMDB, no key, monthly.
+- `provider: maxmind` — GeoLite2, license key required, daily refresh.
+- `provider: mock` — TSV fixture for e2e.
+
+The `geoip` block in the ingress config is optional. With no provider set,
+geo-blocking is disabled and requests carrying `allowed_geos` are rejected.
+DB-IP data is CC BY 4.0; the daemon logs the required attribution at startup.
+
+`geo.Manager` watches the database file (fsnotify plus a 30s poll fallback),
+rebuilds the per-service country→CIDR map from State, and invokes `OnRebuild`,
+which the nftables manager implements as `RefreshGeoSets`. Sets are updated in
+place, so a database refresh needs neither a restart nor a chain rebuild.
+
+With a non-empty allow-list, the per-LB chain starts with:
+
+```text
+ip daddr <extIP> ip saddr not in @geo_<sn> counter drop
+```
+
+followed by the DNAT rules and the final drop. The deny rule must precede DNAT
+(ADR 0001). An unknown country leaves the deny rule in place with an empty set,
+so it fails closed.
 
 ### Macvlan (`internal/macvlan/`)
 
@@ -135,19 +165,24 @@ func (m *NetlinkManager) SetIP(iface string, ip net.IP, subnetMask net.IPMask) e
 
 **Manager behavior:**
 
-- `Run(svc)` — subscribes to state notifications via `LBNotification` channel: -
-  **CreateEvent**: generates a MAC (locally-administered unicast), creates the macvlan
-  interface in **VEPA mode** on the parent interface (`st.BaseIface`), brings it
-  up, then **optimistically** writes interface name and MAC back to State (even
-  if creation failed, other modules are triggered) - **UpdateEvent**: sets the IP
-  address from `SourceAddress`/`SourceMask` using **replace semantics** (removes
-  all existing IPs first), and sets the MAC address via `SetMAC` (no-op if already
-  correct) - **DeleteEvent**: removes the interface; looks up interface name from
-  State (`GetInterfaceName()`) rather than recomputing it from the service key
-- **No periodic reconciliation** — the macvlan module is purely event-driven (unlike
-  the DHCP and Router modules which run a 30s reconcile loop)
-- Restoring state from persistence on startup does **not** automatically recreate
-  macvlan interfaces — only gRPC mutations flow through the event channel
+- `Run(svc)` — subscribes to state notifications via the `LBNotification`
+  channel:
+  - **CreateEvent**: generates a MAC (locally-administered unicast), creates
+    the macvlan interface in **VEPA mode** on the parent interface
+    (`st.BaseIface`), brings it up, then **optimistically** writes the interface
+    name and MAC back to State (even if creation failed, other modules are
+    triggered).
+  - **UpdateEvent**: sets the IP address from `SourceAddress`/`SourceMask`
+    using **replace semantics** (removes all existing IPs first), and sets the
+    MAC address via `SetMAC` (no-op if already correct).
+  - **DeleteEvent**: removes the interface; looks up the interface name from
+    State (`GetInterfaceName()`) rather than recomputing it from the service key.
+- **No periodic reconciliation** — the macvlan module is purely event-driven
+  (unlike the DHCP module, which reconciles every 30s, and the Router module,
+  which reconciles every 5 minutes).
+- Restoring state from persistence on startup does **not** automatically
+  recreate macvlan interfaces — only gRPC mutations flow through the event
+  channel.
 
 **Design details:**
 
@@ -206,10 +241,12 @@ This is the external interface for configuring load balancer rules.
 
 **RPCs:**
 
-- `CreateLoadBalancer` — defines a new service with port mappings
-- `UpdateLoadBalancer` — modifies port mappings for an existing service
+- `CreateLoadBalancer` — defines a new service with port mappings and optional
+  `allowed_geos`
+- `UpdateLoadBalancer` — modifies port mappings or the geo allow-list
 - `DeleteLoadBalancer` — removes a service
-- `GetLoadBalancer` / `ListLoadBalancers` — query current state
+- `GetLoadBalancer` / `ListLoadBalancers` — query current state, including
+  `allowed_geos`
 - `Health` — health check with active macvlan count
 
 All mutations flow through `state.UpdateService()` / `state.DeleteService()`, which
@@ -221,16 +258,21 @@ When a client calls `CreateLoadBalancer("my-svc", [{tcp:80 → 10.0.0.1:8080}])`
 
 1. **Service** creates an `LBService` entry and calls `state.UpdateService()`
 2. **State** emits a `CreateEvent` notification on `UpdateCh`
-3. **Macvlan Manager** receives the event: - Generates a MAC address - Creates macvlan
-   interface `lb-my-sv-<hash>` on the parent interface - Brings the interface up
+3. **Macvlan Manager** receives the event:
+   - Generates a MAC address
+   - Creates macvlan interface `lb-my-sv-<hash>` on the parent interface
+   - Brings the interface up
    - Writes interface name and MAC back to State (triggering an UpdateEvent)
-4. **DHCP Manager** receives the event: - Creates a DHCP client for the new interface
+4. **DHCP Manager** receives the event:
+   - Creates a DHCP client for the new interface
    - Starts DHCP discovery
-5. When DHCP acquires an IP: - The `IPChangeFunc` callback updates State with `SourceAddress`
+5. When DHCP acquires an IP:
+   - The `IPChangeFunc` callback updates State with `SourceAddress`
    - State emits an `UpdateEvent`
-6. **Macvlan Manager** receives the update: - Sets the IP address on the interface
-7. **Router Manager** receives the update: - Creates nftables DNAT rules for `SourceAddress:80
-   → 10.0.0.1:8080`
+6. **Macvlan Manager** receives the update:
+   - Sets the IP address on the interface
+7. **Router Manager** receives the update:
+   - Creates nftables DNAT rules for `SourceAddress:80 → 10.0.0.1:8080`
 
 ## Startup Sequence
 
@@ -239,8 +281,11 @@ In `cmd/ingress/main.go`:
 1. Load configuration and state (or create new state)
 2. Start Macvlan Manager goroutine (subscribes to `UpdateCh`)
 3. Start DHCP Manager goroutine (subscribes to `UpdateCh`)
-4. Start gRPC server (Service module)
-5. On shutdown: graceful gRPC stop, DHCP clients stopped
+4. If `geoip.provider` is set: create the `geoip` manager, start its refresh
+   goroutine, start the `geo` watcher, and wire `OnRebuild` to
+   `nftables.RefreshGeoSets`
+5. Start gRPC server (Service module)
+6. On shutdown: graceful gRPC stop, DHCP clients stopped (releasing leases)
 
 ## State Schema
 
@@ -256,6 +301,7 @@ In `cmd/ingress/main.go`:
       "dhcp_acquired": true,
       "source_address": "192.168.1.100",
       "source_mask": "ffffff00",
+      "allowed_geos": ["US", "CA"],
       "targets": [
         {
           "protocol": "tcp",
@@ -281,6 +327,8 @@ ingress/
 │   ├── auth/            # gRPC authentication interceptors
 │   ├── config/          # Configuration loading
 │   ├── dhcp/            # DHCP client management
+│   ├── geo/             # database watcher + per-service CIDR rebuild
+│   ├── geoip/           # MaxMind/DB-IP providers, downloader, TSV mock
 │   ├── macvlan/         # Macvlan interface management
 │   ├── router/          # Router manager interface + nftables implementation
 │   │   └── nftables/    # nftables rule management
