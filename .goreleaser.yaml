@@ -2,7 +2,7 @@
 archives:
 - files:
   - none*
-  format: binary
+  formats: [binary]
 builds:
 - binary: controller
   env:
@@ -57,6 +57,12 @@ kos:
   - ghcr.io/vranyes/homelab-ingress/controller
   tags:
   - '{{.Commit}}'
-  - 'v{{.Tag}}'
+  - '{{.Tag}}'
+  # ko defaults to publishing an SPDX SBOM as an OCI referrer. GHCR denies
+  # the referrer write for the manifest list with the workflow GITHUB_TOKEN
+  # ("DENIED: requested access to the resource is denied"), failing the whole
+  # release after the image has already been published. SBOMs are optional
+  # for this project, so skip them and keep releases deterministic.
+  sbom: none
 project_name: homelab-ingress
 version: 2
