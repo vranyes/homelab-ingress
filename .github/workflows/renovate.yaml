@@ -1,0 +1,62 @@
+---
+# Renovate - self-hosted dependency updates
+#
+# Config lives in renovate.json at the repo root. This workflow replaces
+# .github/dependabot.yml: do not run both, or you get duplicate PRs.
+#
+# NOTE: PRs opened with the workflow GITHUB_TOKEN do not trigger other
+# workflows, so CI/e2e never run on Renovate PRs. If you want checks on
+# them, add a PAT (repo + workflow scope) as RENOVATE_TOKEN and switch the
+# token below. The weekly run can also be started by hand from the Actions
+# tab (workflow_dispatch).
+#
+# Local dry run (no branches, no PRs):
+#   RENOVATE_ALLOWED_COMMANDS='^go work sync$' RENOVATE_SCHEDULE='at any time' \
+#     npx --yes renovate@44 --platform=local --dry-run=lookup
+name: Renovate
+
+on:
+  schedule:
+    # 12:00 UTC Monday ~ Monday morning in America/Chicago (see schedule in renovate.json)
+    - cron: '0 12 * * 1'
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: Renovate log level
+        type: choice
+        options:
+          - debug
+          - info
+          - warn
+        default: info
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Renovate
+        # renovatebot/github-action publishes immutable per-release tags only
+        # (no moving v46 major tag), so pin the exact version.
+        uses: renovatebot/github-action@v46.3.9
+        with:
+          configurationFile: renovate.json
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
+          # postUpgradeTasks is gated by self-hosted config; `go work sync`
+          # keeps go.work.sum in sync with the per-module go.mod files.
+          RENOVATE_ALLOWED_COMMANDS: '^go work sync$'
+          RENOVATE_REPOSITORIES: ${{ github.repository }}

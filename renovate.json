@@ -1,0 +1,47 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "America/Chicago",
+  "schedule": ["before 9am on monday"],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "minimumReleaseAge": "3 days",
+  "osvVulnerabilityAlerts": true,
+  "postUpdateOptions": ["gomodTidy"],
+  "postUpgradeTasks": {
+    "commands": ["go work sync"],
+    "fileFilters": ["go.work.sum", "**/go.mod", "**/go.sum"],
+    "executionMode": "branch"
+  },
+  "packageRules": [
+    {
+      "description": "Group routine Go module bumps into one PR per module",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "{{parentDir}} go dependencies (non-major)"
+    },
+    {
+      "description": "Go major bumps usually need code changes: ask on the dashboard first",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "k8s.io libraries and controller-runtime are released in lockstep",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/controller-runtime"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "kubernetes libraries"
+    },
+    {
+      "description": "Keep GitHub Actions updates in a single PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    }
+  ]
+}
