@@ -3,7 +3,7 @@ module github.com/vranyes/homelab-ingress/e2e
 go 1.26.0
 
 require (
-	google.golang.org/grpc v1.83.1
+	google.golang.org/grpc v1.83.2
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
