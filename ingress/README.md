@@ -140,6 +140,12 @@ rebuilds the per-service country→CIDR map from State, and invokes `OnRebuild`,
 which the nftables manager implements as `RefreshGeoSets`. Sets are updated in
 place, so a database refresh needs neither a restart nor a chain rebuild.
 
+Country unions are large (US+CA is tens of thousands of ranges), and a single
+netlink message carrying the whole set exceeds the socket limit with
+`sendmsg: message too long` (EMSGSIZE). Set population is therefore split into
+2,000-element chunks, each flushed separately (`geoSetChunkSize`); the chunked
+upload is covered by a real-kernel unit test.
+
 With a non-empty allow-list, the per-LB chain starts with:
 
 ```text

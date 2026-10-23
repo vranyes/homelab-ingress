@@ -258,6 +258,7 @@ type setStore interface {
 	FlushSet(set *nftables.Set)
 	SetAddElements(set *nftables.Set, elements []nftables.SetElement) error
 	DelSet(set *nftables.Set)
+	Flush() error
 }
 
 func geoSetName(sn string) string { return geoSetPrefix + sn }
@@ -336,6 +337,13 @@ func geoSetElements(cidrs []*net.IPNet) []nftables.SetElement {
 	return elements
 }
 
+// geoSetChunkSize bounds the number of set elements per netlink message.
+// A whole-country union (for example US+CA) easily exceeds the kernel socket
+// send buffer: a single 20k-element message fails with EMSGSIZE
+// ("sendmsg: message too long"). 2k keeps each message well under the limit,
+// at the cost of a handful of round-trips per refresh.
+const geoSetChunkSize = 2000
+
 // buildGeoUnionSet creates or refreshes the per-service union set
 // geo_<safeName(serviceKey)>.
 func buildGeoUnionSet(ss setStore, table *nftables.Table, sn string, cidrs []*net.IPNet) (*nftables.Set, error) {
@@ -350,13 +358,13 @@ func buildGeoUnionSet(ss setStore, table *nftables.Table, sn string, cidrs []*ne
 		if s.Name != name {
 			continue
 		}
+		// Flush and repopulate separately: the element list may be too large
+		// for a single message, and SetAddElements cannot split it.
 		ss.FlushSet(s)
-		if len(elements) > 0 {
-			if err := ss.SetAddElements(s, elements); err != nil {
-				return nil, fmt.Errorf("SetAddElements(%s): %w", name, err)
-			}
+		if err := ss.Flush(); err != nil {
+			return nil, fmt.Errorf("flush set %s: %w", name, err)
 		}
-		return s, nil
+		return s, addSetElementsChunked(ss, s, elements)
 	}
 
 	set := &nftables.Set{
@@ -365,10 +373,36 @@ func buildGeoUnionSet(ss setStore, table *nftables.Table, sn string, cidrs []*ne
 		KeyType:  nftables.TypeIPAddr,
 		Interval: true,
 	}
-	if err := ss.AddSet(set, elements); err != nil {
+	// Create the set empty first so element chunks can be sent in their own
+	// messages; AddSet with a full element list would reintroduce EMSGSIZE.
+	if err := ss.AddSet(set, nil); err != nil {
 		return nil, fmt.Errorf("AddSet(%s): %w", name, err)
 	}
+	if err := ss.Flush(); err != nil {
+		return nil, fmt.Errorf("create set %s: %w", name, err)
+	}
+	if err := addSetElementsChunked(ss, set, elements); err != nil {
+		return nil, err
+	}
 	return set, nil
+}
+
+// addSetElementsChunked adds elements in geoSetChunkSize batches, flushing
+// each batch. It is a no-op for an empty set.
+func addSetElementsChunked(ss setStore, set *nftables.Set, elements []nftables.SetElement) error {
+	for start := 0; start < len(elements); start += geoSetChunkSize {
+		end := start + geoSetChunkSize
+		if end > len(elements) {
+			end = len(elements)
+		}
+		if err := ss.SetAddElements(set, elements[start:end]); err != nil {
+			return fmt.Errorf("SetAddElements(%s) [%d:%d]: %w", set.Name, start, end, err)
+		}
+		if err := ss.Flush(); err != nil {
+			return fmt.Errorf("flush set %s [%d:%d]: %w", set.Name, start, end, err)
+		}
+	}
+	return nil
 }
 
 // buildGeoSetDenyExprs returns:

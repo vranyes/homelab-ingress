@@ -224,7 +224,10 @@ func TestPlanRules_RateLimitAfterGeo(t *testing.T) {
 	}
 }
 
-func TestPlanRules_RemovesStaleRateLimitSets(t *testing.T) {
+// TestPlanRules_KeepsOldRateLimitSet pins the ordering contract: planRules
+// must not delete the previous set, because the old rule still references it.
+// AddRules deletes it only after flushing the chain.
+func TestPlanRules_KeepsOldRateLimitSet(t *testing.T) {
 	m := &Manager{logger: testLogger()}
 	c := newTestConn(t)
 	ss := newFakeSetStore()
@@ -239,20 +242,49 @@ func TestPlanRules_RemovesStaleRateLimitSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("planRules: %v", err)
 	}
-	if _, ok := ss.sets[old]; ok {
-		t.Fatal("stale rate-limit set was not deleted")
+	if _, ok := ss.sets[old]; !ok {
+		t.Fatal("planRules deleted a set that the old rule may still reference")
 	}
 	d := findDynset(t, rules[0].Exprs)
 	if _, ok := ss.sets[d.SetName]; !ok {
 		t.Fatalf("new set %q missing", d.SetName)
 	}
+}
 
-	// Removing the limit deletes the set too.
-	if _, err := m.planRules(c, ss, table, chain, rateLimitedService(nil)); err != nil {
-		t.Fatalf("planRules without limit: %v", err)
+func TestRemoveStaleRateLimitSets(t *testing.T) {
+	ss := newFakeSetStore()
+	table := &nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv4}
+	sn := safeName("ns/svc")
+
+	old := rateLimitSetName(sn, state.RateLimit{Rate: 1, Burst: 1})
+	keep := rateLimitSetName(sn, state.RateLimit{Rate: 5, Burst: 10})
+	other := rateLimitSetName(safeName("ns/other"), state.RateLimit{Rate: 1, Burst: 1})
+	for _, name := range []string{old, keep, other} {
+		ss.sets[name] = &nftables.Set{Table: table, Name: name, KeyType: nftables.TypeIPAddr, Dynamic: true}
 	}
-	if len(ss.sets) != 0 {
-		t.Fatalf("sets left after disabling the limit: %+v", ss.sets)
+
+	if err := removeStaleRateLimitSets(ss, table, sn, keep); err != nil {
+		t.Fatalf("removeStaleRateLimitSets: %v", err)
+	}
+	if _, ok := ss.sets[old]; ok {
+		t.Fatal("stale set was not deleted")
+	}
+	if _, ok := ss.sets[keep]; !ok {
+		t.Fatal("current set was deleted")
+	}
+	if _, ok := ss.sets[other]; !ok {
+		t.Fatal("another service's set was deleted")
+	}
+
+	// Disabling the limit removes every set for the service.
+	if err := removeStaleRateLimitSets(ss, table, sn, ""); err != nil {
+		t.Fatalf("removeStaleRateLimitSets without keep: %v", err)
+	}
+	if _, ok := ss.sets[keep]; ok {
+		t.Fatal("set survived disabling the limit")
+	}
+	if _, ok := ss.sets[other]; !ok {
+		t.Fatal("another service's set was deleted")
 	}
 }
 

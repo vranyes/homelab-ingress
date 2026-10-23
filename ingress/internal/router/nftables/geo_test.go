@@ -18,11 +18,13 @@ import (
 func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 type fakeSetStore struct {
-	sets     map[string]*nftables.Set
-	elements map[string][]nftables.SetElement
-	added    []string
-	flushed  []string
-	deleted  []string
+	sets       map[string]*nftables.Set
+	elements   map[string][]nftables.SetElement
+	added      []string
+	flushed    []string
+	deleted    []string
+	flushes    int
+	chunkCalls int
 }
 
 func newFakeSetStore() *fakeSetStore {
@@ -48,10 +50,19 @@ func (f *fakeSetStore) AddSet(s *nftables.Set, elements []nftables.SetElement) e
 	return nil
 }
 
-func (f *fakeSetStore) FlushSet(s *nftables.Set) { f.flushed = append(f.flushed, s.Name) }
+func (f *fakeSetStore) FlushSet(s *nftables.Set) {
+	f.flushed = append(f.flushed, s.Name)
+	f.elements[s.Name] = nil
+}
 
 func (f *fakeSetStore) SetAddElements(s *nftables.Set, elements []nftables.SetElement) error {
-	f.elements[s.Name] = append([]nftables.SetElement(nil), elements...)
+	f.elements[s.Name] = append(f.elements[s.Name], elements...)
+	f.chunkCalls++
+	return nil
+}
+
+func (f *fakeSetStore) Flush() error {
+	f.flushes++
 	return nil
 }
 
@@ -95,6 +106,83 @@ func TestGeoSetName(t *testing.T) {
 	sn := safeName("ns/svc")
 	if got := geoSetName(sn); got != geoSetPrefix+sn {
 		t.Fatalf("geo set name = %q", got)
+	}
+}
+
+func TestAddSetElementsChunked(t *testing.T) {
+	ss := newFakeSetStore()
+	set := &nftables.Set{Name: "chunked"}
+	total := 2*geoSetChunkSize + 1
+	els := make([]nftables.SetElement, 0, total)
+	for i := 0; i < total; i++ {
+		els = append(els, nftables.SetElement{Key: binary.BigEndian.AppendUint32(nil, uint32(i+1))})
+	}
+
+	if err := addSetElementsChunked(ss, set, els); err != nil {
+		t.Fatalf("addSetElementsChunked: %v", err)
+	}
+	if ss.chunkCalls != 3 {
+		t.Fatalf("chunk calls = %d, want 3", ss.chunkCalls)
+	}
+	if ss.flushes != 3 {
+		t.Fatalf("flushes = %d, want 3", ss.flushes)
+	}
+	if got := len(ss.elements[set.Name]); got != total {
+		t.Fatalf("elements = %d, want %d", got, total)
+	}
+}
+
+// TestAddSetElementsChunkedRealKernel is the regression test for the
+// EMSGSIZE ("sendmsg: message too long") failure seen with real US+CA geo
+// sets. It needs a writable netlink socket; unprivileged runs skip.
+func TestAddSetElementsChunkedRealKernel(t *testing.T) {
+	c, err := nftables.New()
+	if err != nil {
+		t.Skipf("nftables unavailable: %v", err)
+	}
+
+	table := &nftables.Table{Name: "hl_test_chunk", Family: nftables.TableFamilyIPv4}
+	if tables, err := c.ListTables(); err == nil {
+		for _, old := range tables {
+			if old.Name == table.Name {
+				c.DelTable(old)
+			}
+		}
+	}
+	c.AddTable(table)
+	if err := c.Flush(); err != nil {
+		t.Skipf("nftables not writable: %v", err)
+	}
+	defer func() {
+		c.DelTable(table)
+		_ = c.Flush()
+	}()
+
+	set := &nftables.Set{Table: table, Name: "s", KeyType: nftables.TypeIPAddr}
+	if err := c.AddSet(set, nil); err != nil {
+		t.Fatalf("AddSet: %v", err)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("create set: %v", err)
+	}
+
+	// 20k elements reproduces EMSGSIZE when sent as one message on the test
+	// VM; chunking must keep each message under the socket limit.
+	total := 20000
+	els := make([]nftables.SetElement, 0, total)
+	for i := 0; i < total; i++ {
+		els = append(els, nftables.SetElement{Key: binary.BigEndian.AppendUint32(nil, uint32(i+1))})
+	}
+	if err := addSetElementsChunked(c, set, els); err != nil {
+		t.Fatalf("addSetElementsChunked: %v", err)
+	}
+
+	got, err := c.GetSetElements(set)
+	if err != nil {
+		t.Fatalf("GetSetElements: %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("set elements = %d, want %d", len(got), total)
 	}
 }
 

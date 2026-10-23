@@ -46,8 +46,9 @@ expression — the replacement for iptables `hashlimit` / nft `meter`.
   element. Existing elements therefore keep their old bucket until they expire.
   Including `(rate, burst)` in the set name makes a configuration change
   materialise a fresh, empty set; the previous set is deleted in the same
-  batch. Reconciles that do not change the limit reuse the existing set, so
-  buckets survive.
+  batch, but only after the old chain has been flushed. Deleting a set that the
+  old rule still references fails the batch with EBUSY. Reconciles that do not
+  change the limit reuse the existing set, so buckets survive.
 - **Cleanup:** a missing `rate-limit` deletes the set. Deleting a set is only
   attempted after `GetSets` confirms it exists: `DelSet` on a missing set
   returns ENOENT and aborts the whole netlink batch, which would leave the

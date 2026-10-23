@@ -178,6 +178,7 @@ func (m *Manager) AddRules(service state.LBService) error {
 		return fmt.Errorf("find chain: %w", err)
 	}
 
+	created := false
 	if pc == nil {
 		m.logger.Info("creating new chain for service", "chain", pCName, "service", service.ServiceName)
 		// pd := nftables.ChainPolicyDrop
@@ -190,15 +191,32 @@ func (m *Manager) AddRules(service state.LBService) error {
 			// Policy:   &pd,
 			// Device:   "lan2",
 		})
-	} else {
-		m.logger.Info("chain already exists, flushing existing rules", "chain", pc.Name)
-		m.conn.FlushChain(pc)
+		created = true
 	}
 
+	// Plan before flushing an existing chain. Populating a large geo set
+	// flushes element chunks internally; if that fails, the previous rules
+	// must stay installed.
 	rules, err := m.planRules(m.conn, m.conn, table, pc, service)
 	if err != nil {
 		return err
 	}
+	if !created {
+		m.logger.Info("chain already exists, flushing existing rules", "chain", pc.Name)
+		m.conn.FlushChain(pc)
+	}
+
+	// Remove rate-limit sets from a previous configuration only after the
+	// chain flush above. Deleting one while the old rule still references it
+	// returns EBUSY and aborts the batch.
+	keepSet := ""
+	if service.RateLimit != nil {
+		keepSet = rateLimitSetName(sn, *service.RateLimit)
+	}
+	if err := removeStaleRateLimitSets(m.conn, table, sn, keepSet); err != nil {
+		return fmt.Errorf("remove stale rate-limit sets: %w", err)
+	}
+
 	for _, rule := range rules {
 		m.conn.AddRule(rule)
 	}
@@ -246,14 +264,9 @@ func (m *Manager) planRules(c *nftables.Conn, ss setStore, table *nftables.Table
 
 	// Rate limiting sits after the geo deny (blocked countries must not
 	// consume set slots) and before DNAT (the DNAT branch accepts, which
-	// terminates the chain).
-	keepSet := ""
-	if service.RateLimit != nil {
-		keepSet = rateLimitSetName(sn, *service.RateLimit)
-	}
-	if err := removeStaleRateLimitSets(ss, table, sn, keepSet); err != nil {
-		return nil, fmt.Errorf("remove stale rate-limit sets: %w", err)
-	}
+	// terminates the chain). Stale sets are removed by AddRules after the
+	// old chain has been flushed: deleting a set that the old rule still
+	// references fails the whole batch with EBUSY.
 	if service.RateLimit != nil {
 		set, err := ensureRateLimitSet(ss, table, sn, *service.RateLimit)
 		if err != nil {
