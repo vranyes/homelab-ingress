@@ -55,6 +55,12 @@ kos:
   - linux/arm64
   repositories:
   - ghcr.io/vranyes/homelab-ingress/controller
+  # ko's default namer appends "-<md5(import path)>" to the repository, which
+  # published releases as
+  #   ghcr.io/vranyes/homelab-ingress/controller/controller-3220ee23...:v0.2.0
+  # instead of the repository above. Pull with the bare repository instead:
+  #   ghcr.io/vranyes/homelab-ingress/controller:v0.2.0
+  bare: true
   tags:
   - '{{.Commit}}'
   - '{{.Tag}}'
