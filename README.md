@@ -38,6 +38,13 @@ geoip:
 See [docs/GEOBLOCKING_PLAN.md](docs/GEOBLOCKING_PLAN.md) and
 [ADR 0006](docs/adr/0006-dbip-lite-provider.md).
 
+## OpenWrt
+
+The router package installs a procd init script plus a UCI config that is
+translated into the YAML the daemon reads, including the geo-blocking options.
+See [docs/openwrt.md](docs/openwrt.md) for the option reference and the
+state/cache layout.
+
 ## Requirements
 
 - A Linux based router with nftables.

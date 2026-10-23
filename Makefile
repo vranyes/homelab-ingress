@@ -63,7 +63,12 @@ build-e2e-binaries: $(BIN_DIR)/ingress $(BIN_DIR)/controller $(BIN_DIR)/oidc-moc
 clean-e2e-binaries:
 	rm -rf $(BIN_DIR)
 
-test: test-unit test-e2e ## Run unit tests, then e2e suite
+test: test-init test-unit test-e2e ## Run init script tests, unit tests, then e2e suite
+
+.PHONY: test-init
+test-init: ## Test the OpenWrt init script's UCI -> YAML translation
+	@echo "==> Running init script tests"
+	sh files/homelab-ingress.init.test.sh
 
 .PHONY: proto
 proto: ## Regenerate the router gRPC bindings (needs protoc + Go plugins)

@@ -25,6 +25,9 @@ jobs:
     - name: Run tests
       run: go test ./internal/... -cover -v
       working-directory: ${{ matrix.module }}
+    - name: Test OpenWrt init script
+      if: matrix.module == 'ingress'
+      run: sh files/homelab-ingress.init.test.sh
     strategy:
       matrix:
         module: [ingress, controller]

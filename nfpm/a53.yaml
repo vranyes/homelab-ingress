@@ -15,6 +15,10 @@ contents:
   file_info:
     mode: 644
   src: files/homelab-ingress.config
+- dst: /etc/homelab-ingress/config.yaml.example
+  file_info:
+    mode: 644
+  src: files/config.yaml
 depends:
 - procd
 - uci

@@ -6,7 +6,7 @@ auth:
   # Additional subjects can be added, e.g. for the CLI:
   # - some-other-subject
   # audience and issuer are required.
-  audience: homelab-ingress-service
+  audience: homelab-ingress
   issuer: https://myoidcissuer.local:6443
   # trusted_root_ca is optional. When set, it points to a CA certificate file
   # used to verify the TLS connection to the OIDC issuer. Useful for private

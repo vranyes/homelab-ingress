@@ -1,14 +1,27 @@
 #!/bin/sh /etc/rc.common
 
+# Read by /etc/rc.common, not by this script.
+# shellcheck disable=SC2034
 START=95
+# shellcheck disable=SC2034
 STOP=10
+# shellcheck disable=SC2034
 USE_PROCD=1
 
 SERVICE_BIN=${SERVICE_BIN:-/usr/bin/homelab-ingress}
 NAME=homelab-ingress
-GENERATED_CONFIG="/var/etc/${NAME}/config.yaml"
+SECTION=config
+GENERATED_CONFIG=${GENERATED_CONFIG:-"/var/etc/${NAME}/config.yaml"}
+
+# Country databases are multi-megabyte files that are re-downloaded on
+# refresh. Keep them out of the overlay (flash) by default; a tmpfs-backed
+# /var/lib costs one download per boot and no flash wear. An explicit
+# geoip_cache_path in UCI always wins.
+GEOIP_CACHE_DIR="${GEOIP_CACHE_DIR:-/var/lib/${NAME}}"
+GEOIP_CACHE_PATH_DEFAULT="${GEOIP_CACHE_DIR}/geo.mmdb"
 
 BASE_INTERFACE=
+STATE_DIR=
 GRPC_LISTEN=
 WS_LISTEN=
 AUTH_ISSUER=
@@ -16,78 +29,225 @@ AUTH_AUDIENCE=
 AUTH_ALLOWED_SUBJECTS=
 AUTH_TRUSTED_ROOT_CA=
 MASQUERADE_RULES=
+GEOIP_PROVIDER=
+GEOIP_LICENSE_KEY=
+GEOIP_EDITION=
+GEOIP_DOWNLOAD_URL=
+GEOIP_REFRESH_INTERVAL=
+GEOIP_STALE_AFTER=
+GEOIP_CACHE_PATH=
 
+# List values are newline-joined rather than space-joined: OIDC subjects are
+# arbitrary strings and may contain spaces.
 append_subject() {
-	AUTH_ALLOWED_SUBJECTS="${AUTH_ALLOWED_SUBJECTS} ${1}"
+	AUTH_ALLOWED_SUBJECTS="${AUTH_ALLOWED_SUBJECTS}
+${1}"
 }
 
 append_masquerade() {
-	MASQUERADE_RULES="${MASQUERADE_RULES} ${1}"
+	MASQUERADE_RULES="${MASQUERADE_RULES}
+${1}"
+}
+
+# yaml_str prints a YAML single-quoted scalar. Single quotes make colons,
+# '#', '*', leading/trailing spaces and empty values literal, and '' escapes
+# an embedded quote. Without this, an issuer URL containing '#' silently
+# truncates and an empty value turns into YAML null.
+yaml_str() {
+	printf "'%s'" "$(printf '%s' "${1}" | sed "s/'/''/g")"
+}
+
+# geoip_cache_path resolves the cache file, preferring UCI over the volatile
+# default. One stable filename for every provider keeps this script from
+# duplicating the daemon's per-provider defaults.
+geoip_cache_path() {
+	if [ -n "${GEOIP_CACHE_PATH}" ]; then
+		printf '%s' "${GEOIP_CACHE_PATH}"
+	else
+		printf '%s' "${GEOIP_CACHE_PATH_DEFAULT}"
+	fi
 }
 
 generate_config() {
-	mkdir -p "/var/etc/${NAME}"
+	mkdir -p "$(dirname "${GENERATED_CONFIG}")"
 
 	{
 		echo "---"
-		echo "base_interface: ${BASE_INTERFACE}"
-		echo "grpc:"
-		echo "  listen: ${GRPC_LISTEN}"
-		echo "ws:"
-		echo "  listen: ${WS_LISTEN}"
-		if [ -n "${AUTH_ISSUER}" ] && [ -n "${AUTH_ALLOWED_SUBJECTS}" ]; then
-			echo "auth:"
-			echo "  issuer: ${AUTH_ISSUER}"
-			echo "  audience: ${AUTH_AUDIENCE}"
-			[ -n "${AUTH_TRUSTED_ROOT_CA}" ] && echo "  trusted_root_ca: ${AUTH_TRUSTED_ROOT_CA}"
-			echo "  allowed_subjects:"
-			for subj in ${AUTH_ALLOWED_SUBJECTS}; do
-				echo "    - ${subj}"
-			done
+		echo "base_interface: $(yaml_str "${BASE_INTERFACE}")"
+
+		# grpc/ws are omitted when unset: the daemon owns those defaults.
+		if [ -n "${GRPC_LISTEN}" ]; then
+			echo "grpc:"
+			echo "  listen: $(yaml_str "${GRPC_LISTEN}")"
 		fi
+		if [ -n "${WS_LISTEN}" ]; then
+			echo "ws:"
+			echo "  listen: $(yaml_str "${WS_LISTEN}")"
+		fi
+
+		echo "auth:"
+		echo "  issuer: $(yaml_str "${AUTH_ISSUER}")"
+		echo "  audience: $(yaml_str "${AUTH_AUDIENCE}")"
+		if [ -n "${AUTH_TRUSTED_ROOT_CA}" ]; then
+			echo "  trusted_root_ca: $(yaml_str "${AUTH_TRUSTED_ROOT_CA}")"
+		fi
+		echo "  allowed_subjects:"
+		while IFS= read -r subj; do
+			[ -n "${subj}" ] || continue
+			echo "    - $(yaml_str "${subj}")"
+		done <<EOF
+${AUTH_ALLOWED_SUBJECTS}
+EOF
 
 		if [ -n "${MASQUERADE_RULES}" ]; then
 			echo "masquerade:"
-			for rule in ${MASQUERADE_RULES}; do
-				input="${rule%%,*}"
-				output="${rule#*,}"
-				echo "  - input_device: ${input}"
-				echo "    output_device: ${output}"
-			done
+			while IFS= read -r rule; do
+				[ -n "${rule}" ] || continue
+				echo "  - input_device: $(yaml_str "${rule%%,*}")"
+				echo "    output_device: $(yaml_str "${rule#*,}")"
+			done <<EOF
+${MASQUERADE_RULES}
+EOF
 		fi
-	} > "${GENERATED_CONFIG}"
+
+		# An empty provider disables geo-blocking entirely; emit nothing
+		# rather than an empty block.
+		if [ -n "${GEOIP_PROVIDER}" ]; then
+			echo "geoip:"
+			echo "  provider: $(yaml_str "${GEOIP_PROVIDER}")"
+			if [ -n "${GEOIP_LICENSE_KEY}" ]; then
+				echo "  license_key: $(yaml_str "${GEOIP_LICENSE_KEY}")"
+			fi
+			if [ -n "${GEOIP_EDITION}" ]; then
+				echo "  edition: $(yaml_str "${GEOIP_EDITION}")"
+			fi
+			if [ -n "${GEOIP_DOWNLOAD_URL}" ]; then
+				echo "  download_url: $(yaml_str "${GEOIP_DOWNLOAD_URL}")"
+			fi
+			if [ -n "${GEOIP_REFRESH_INTERVAL}" ]; then
+				echo "  refresh_interval: $(yaml_str "${GEOIP_REFRESH_INTERVAL}")"
+			fi
+			if [ -n "${GEOIP_STALE_AFTER}" ]; then
+				echo "  stale_after: $(yaml_str "${GEOIP_STALE_AFTER}")"
+			fi
+			echo "  cache_path: $(yaml_str "$(geoip_cache_path)")"
+		fi
+	} > "${GENERATED_CONFIG}" || {
+		echo "Cannot start ${NAME}: cannot write ${GENERATED_CONFIG}" >&2
+		return 1
+	}
+	# The generated file can hold a MaxMind license key.
+	chmod 600 "${GENERATED_CONFIG}"
+}
+
+# validate_config mirrors the daemon's own validation so a bad UCI value fails
+# once with a readable message instead of crash-looping under procd.
+validate_config() {
+	if [ -z "${BASE_INTERFACE}" ]; then
+		echo "Cannot start ${NAME}: base_interface is required (set via UCI)" >&2
+		return 1
+	fi
+	if [ -z "${AUTH_ISSUER}" ]; then
+		echo "Cannot start ${NAME}: auth_issuer is required (set via UCI)" >&2
+		return 1
+	fi
+	if [ -z "${AUTH_AUDIENCE}" ]; then
+		echo "Cannot start ${NAME}: auth_audience is required (set via UCI)" >&2
+		return 1
+	fi
+	if [ -z "${AUTH_ALLOWED_SUBJECTS}" ]; then
+		echo "Cannot start ${NAME}: auth_allowed_subjects needs at least one entry" >&2
+		return 1
+	fi
+
+	while IFS= read -r rule; do
+		[ -n "${rule}" ] || continue
+		case "${rule}" in
+		*,*)
+			if [ -z "${rule%%,*}" ] || [ -z "${rule#*,}" ]; then
+				echo "Cannot start ${NAME}: masquerade entry '${rule}' needs both devices" >&2
+				return 1
+			fi
+			;;
+		*)
+			echo "Cannot start ${NAME}: masquerade entry '${rule}' must be 'input_device,output_device'" >&2
+			return 1
+			;;
+		esac
+	done <<EOF
+${MASQUERADE_RULES}
+EOF
+
+	case "${GEOIP_PROVIDER}" in
+	"") ;;
+	dbip | maxmind | mock) ;;
+	*)
+		echo "Cannot start ${NAME}: geoip_provider '${GEOIP_PROVIDER}' is not supported (want dbip, maxmind or mock)" >&2
+		return 1
+		;;
+	esac
+	if [ "${GEOIP_PROVIDER}" = "maxmind" ] && [ -z "${GEOIP_LICENSE_KEY}" ]; then
+		echo "Cannot start ${NAME}: geoip_license_key is required for provider maxmind" >&2
+		return 1
+	fi
+	if [ "${GEOIP_PROVIDER}" = "mock" ]; then
+		echo "${NAME}: warning: geoip_provider 'mock' is for e2e fixtures, not production" >&2
+	fi
 }
 
 start_service() {
 	config_load "${NAME}"
 
-	config_get BASE_INTERFACE config base_interface
-	config_get GRPC_LISTEN config grpc_listen "0.0.0.0:50051"
-	config_get WS_LISTEN config ws_listen "0.0.0.0:50052"
-	config_get AUTH_ISSUER config auth_issuer ""
-	config_get AUTH_AUDIENCE config auth_audience ""
-	config_get AUTH_TRUSTED_ROOT_CA config auth_trusted_root_ca ""
+	config_get BASE_INTERFACE "${SECTION}" base_interface ""
+	config_get STATE_DIR "${SECTION}" state_dir ""
+	config_get GRPC_LISTEN "${SECTION}" grpc_listen ""
+	config_get WS_LISTEN "${SECTION}" ws_listen ""
+	config_get AUTH_ISSUER "${SECTION}" auth_issuer ""
+	config_get AUTH_AUDIENCE "${SECTION}" auth_audience ""
+	config_get AUTH_TRUSTED_ROOT_CA "${SECTION}" auth_trusted_root_ca ""
+	config_get GEOIP_PROVIDER "${SECTION}" geoip_provider ""
+	config_get GEOIP_LICENSE_KEY "${SECTION}" geoip_license_key ""
+	config_get GEOIP_EDITION "${SECTION}" geoip_edition ""
+	config_get GEOIP_DOWNLOAD_URL "${SECTION}" geoip_download_url ""
+	config_get GEOIP_REFRESH_INTERVAL "${SECTION}" geoip_refresh_interval ""
+	config_get GEOIP_STALE_AFTER "${SECTION}" geoip_stale_after ""
+	config_get GEOIP_CACHE_PATH "${SECTION}" geoip_cache_path ""
 
 	AUTH_ALLOWED_SUBJECTS=
-	config_list_foreach config auth_allowed_subjects append_subject
+	config_list_foreach "${SECTION}" auth_allowed_subjects append_subject
 
 	MASQUERADE_RULES=
-	config_list_foreach config masquerade append_masquerade
+	config_list_foreach "${SECTION}" masquerade append_masquerade
 
-	if [ -z "${BASE_INTERFACE}" ]; then
-		echo "Cannot start ${NAME}: base_interface is required (set via UCI)" >&2
-		return 1
-	fi
-
-	generate_config
+	validate_config || return 1
 
 	if [ ! -x "${SERVICE_BIN}" ]; then
 		echo "Cannot start ${NAME}: binary not found: ${SERVICE_BIN}" >&2
 		return 1
 	fi
 
+	if [ -n "${STATE_DIR}" ]; then
+		mkdir -p "${STATE_DIR}" || {
+			echo "Cannot start ${NAME}: cannot create state_dir ${STATE_DIR}" >&2
+			return 1
+		}
+	fi
+	if [ -n "${GEOIP_PROVIDER}" ]; then
+		mkdir -p "$(dirname "$(geoip_cache_path)")" || {
+			echo "Cannot start ${NAME}: cannot create the geoip cache directory" >&2
+			return 1
+		}
+	fi
+
+	generate_config || return 1
+
 	procd_open_instance
-	procd_set_param command "${SERVICE_BIN}" -config "${GENERATED_CONFIG}"
+	if [ -n "${STATE_DIR}" ]; then
+		procd_set_param command "${SERVICE_BIN}" \
+			-config "${GENERATED_CONFIG}" -state-dir "${STATE_DIR}"
+	else
+		procd_set_param command "${SERVICE_BIN}" -config "${GENERATED_CONFIG}"
+	fi
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param respawn
