@@ -36,6 +36,14 @@ func validateService(svc state.LBService) error {
 			return fmt.Errorf("invalid ISO-3166 alpha-2 code %q", cc)
 		}
 	}
+	if svc.RateLimit != nil {
+		if svc.RateLimit.Rate == 0 {
+			return fmt.Errorf("rate_limit.rate must be greater than zero")
+		}
+		if svc.RateLimit.Burst == 0 {
+			return fmt.Errorf("rate_limit.burst must be greater than zero")
+		}
+	}
 	for i, target := range svc.Targets {
 		if target.Protocol != "tcp" && target.Protocol != "udp" {
 			return fmt.Errorf("target %d: unsupported protocol %q (must be tcp or udp)", i, target.Protocol)

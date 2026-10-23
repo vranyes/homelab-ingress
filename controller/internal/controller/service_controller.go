@@ -170,6 +170,14 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 	}
 
 	geos := AllowedGeos(svc)
+	desiredRateLimit, rateLimitErr := RateLimitFromAnnotations(svc)
+	if rateLimitErr != nil {
+		// A malformed annotation must not silently disable protection. Keep
+		// the limit the router already has; the rest of the spec still
+		// reconciles.
+		logger.Info("invalid rate-limit annotation, keeping the previous limit",
+			"service", serviceKey, "error", rateLimitErr)
+	}
 
 	existing, err := r.RouterClient.Get(ctx, serviceKey)
 	if err != nil {
@@ -184,8 +192,11 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 	}
 
 	if existing == nil {
+		// Nothing to preserve on create; an invalid annotation simply means
+		// the first install has no limit.
+		createRateLimit := toRouterRateLimit(desiredRateLimit)
 		logger.Info("creating load balancer on router", "service", serviceKey)
-		entry, err := r.RouterClient.Create(ctx, serviceKey, ports, geos)
+		entry, err := r.RouterClient.Create(ctx, serviceKey, ports, geos, createRateLimit)
 		if err != nil {
 			if router.IsRetryable(err) {
 				logger.Info("router temporarily unavailable during create, requeueing", "service", serviceKey, "error", err)
@@ -210,9 +221,17 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 		return ctrl.Result{RequeueAfter: targetConvergenceDelay}, nil
 	}
 
-	if portsChanged(existing.Ports, ports) || geosChanged(existing.AllowedGeos, geos) {
+	if rateLimitErr != nil {
+		// Preserve the last known good value while still reconciling ports
+		// and geo rules.
+		desiredRateLimit = fromRouterRateLimit(existing.RateLimit)
+	}
+
+	if portsChanged(existing.Ports, ports) ||
+		geosChanged(existing.AllowedGeos, geos) ||
+		rateLimitChanged(fromRouterRateLimit(existing.RateLimit), desiredRateLimit) {
 		logger.Info("updating load balancer on router", "service", serviceKey)
-		if err := r.RouterClient.Update(ctx, serviceKey, ports, geos); err != nil {
+		if err := r.RouterClient.Update(ctx, serviceKey, ports, geos, toRouterRateLimit(desiredRateLimit)); err != nil {
 			if router.IsRetryable(err) {
 				logger.Info("router temporarily unavailable during update, requeueing", "service", serviceKey, "error", err)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -404,6 +423,20 @@ func portsChanged(existing, desired []router.PortMapping) bool {
 
 // geosChanged compares allow-lists as sets so annotation ordering does not
 // churn the router.
+func toRouterRateLimit(rl *RateLimit) *router.RateLimit {
+	if rl == nil {
+		return nil
+	}
+	return &router.RateLimit{Rate: rl.Rate, Burst: rl.Burst}
+}
+
+func fromRouterRateLimit(rl *router.RateLimit) *RateLimit {
+	if rl == nil {
+		return nil
+	}
+	return &RateLimit{Rate: rl.Rate, Burst: rl.Burst}
+}
+
 func geosChanged(existing, desired []string) bool {
 	if len(existing) != len(desired) {
 		return true

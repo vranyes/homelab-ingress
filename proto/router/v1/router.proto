@@ -22,10 +22,20 @@ message Destination {
   string addr = 2;
 }
 
+// RateLimit caps the number of new connections per source IP for a
+// LoadBalancer Service. Rate is the sustained number of new connections per
+// second; burst is the token-bucket capacity. A burst of zero means "use the
+// rate".
+message RateLimit {
+  uint64 rate = 1;
+  uint32 burst = 2;
+}
+
 message CreateLoadBalancerRequest {
   string service_key = 1;
   repeated PortMapping ports = 2;
   repeated string allowed_geos = 3; // ISO-3166 alpha-2 country codes
+  RateLimit rate_limit = 4;          // absent disables rate limiting
 }
 
 message CreateLoadBalancerResponse {
@@ -36,6 +46,7 @@ message UpdateLoadBalancerRequest {
   string service_key = 1;
   repeated PortMapping ports = 2;
   repeated string allowed_geos = 3; // ISO-3166 alpha-2 country codes
+  RateLimit rate_limit = 4;          // absent clears the rate limit
 }
 
 message UpdateLoadBalancerResponse {}
@@ -57,6 +68,7 @@ message GetLoadBalancerResponse {
   bool dhcp_acquired = 4;
   string interface_name = 5;
   repeated string allowed_geos = 6; // ISO-3166 alpha-2 country codes
+  RateLimit rate_limit = 7;          // absent means rate limiting is disabled
 }
 
 message ListLoadBalancersRequest {}

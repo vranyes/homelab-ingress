@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -226,6 +227,51 @@ func AttemptRequestsFromNS(ctx context.Context, ns, sourceIP, lbAddr string, n i
 		}
 	}
 	return attempted, succeeded, firstErr
+}
+
+// AttemptParallelFromNS fires `n` HTTP GETs concurrently from inside `ns`,
+// optionally bound to sourceIP, and reports how many succeeded. Each request
+// is a separate curl process, so each opens a fresh TCP connection — exactly
+// what a per-client new-connection limiter counts. Returns an error only when
+// the shell itself fails; individual request failures are reflected in the
+// returned count.
+func AttemptParallelFromNS(ctx context.Context, ns, sourceIP, lbAddr string, n int, perRequest time.Duration) (int, error) {
+	if n <= 0 {
+		return 0, nil
+	}
+	if perRequest <= 0 {
+		perRequest = time.Second
+	}
+	iface := ""
+	if sourceIP != "" {
+		iface = "--interface " + sourceIP + " "
+	}
+	script := fmt.Sprintf(`res=$(mktemp)
+i=0
+while [ $i -lt %d ]; do
+  ( curl -sS -o /dev/null -m %s 2>/dev/null %s%s && echo 1 >> "$res" || echo 0 >> "$res" ) &
+  i=$((i+1))
+done
+wait
+cat "$res"
+rm -f "$res"
+`, n, strconv.FormatFloat(perRequest.Seconds(), 'g', -1, 64), iface, "http://"+lbAddr+"/")
+
+	out, err := RunShell(ctx, "ip netns exec "+ns+" sh -c "+shellSingleQuote(script))
+	if err != nil {
+		return 0, fmt.Errorf("parallel requests from %s: %w: %s", ns, err, bodySnippet(out))
+	}
+	succeeded := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "1" {
+			succeeded++
+		}
+	}
+	return succeeded, nil
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // AddNSAddress idempotently assigns an address inside a namespace.

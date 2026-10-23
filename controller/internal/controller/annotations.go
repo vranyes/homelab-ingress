@@ -1,7 +1,10 @@
 package controller
 
 import (
+	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,10 +14,66 @@ const (
 	AnnotationPrefix      = "homelab-ingress.vranyes.com"
 	AnnotationSkip        = AnnotationPrefix + "/skip"
 	AnnotationAllowedGeos = AnnotationPrefix + "/allowed-geos"
-	Finalizer             = AnnotationPrefix + "/cleanup"
+	// AnnotationRateLimit is the sustained number of new connections per
+	// second allowed from a single source IP. Absent disables rate limiting.
+	AnnotationRateLimit = AnnotationPrefix + "/rate-limit"
+	// AnnotationRateLimitBurst is the token-bucket capacity. When absent it
+	// defaults to the sustained rate.
+	AnnotationRateLimitBurst = AnnotationPrefix + "/rate-limit-burst"
+	Finalizer                = AnnotationPrefix + "/cleanup"
 )
 
+// RateLimit is the normalised form of the rate-limit annotations.
+type RateLimit struct {
+	Rate  uint64
+	Burst uint32
+}
+
 var isoAlpha2RE = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// RateLimitFromAnnotations parses and normalises the rate-limit annotations.
+// A missing rate annotation yields (nil, nil): rate limiting is disabled.
+// Invalid values return an error so the reconciler can keep the last known
+// good limit instead of silently changing protection.
+func RateLimitFromAnnotations(svc *corev1.Service) (*RateLimit, error) {
+	if svc == nil || svc.Annotations == nil {
+		return nil, nil
+	}
+	rawRate, ok := svc.Annotations[AnnotationRateLimit]
+	if !ok || strings.TrimSpace(rawRate) == "" {
+		return nil, nil
+	}
+	rate, err := parsePositiveUint(rawRate, 64)
+	if err != nil || rate == 0 {
+		return nil, fmt.Errorf("invalid %s %q: want a positive integer (new connections per second)", AnnotationRateLimit, rawRate)
+	}
+
+	burst := rate
+	if rawBurst, ok := svc.Annotations[AnnotationRateLimitBurst]; ok && strings.TrimSpace(rawBurst) != "" {
+		burst, err = parsePositiveUint(rawBurst, 32)
+		if err != nil || burst == 0 {
+			return nil, fmt.Errorf("invalid %s %q: want a positive integer", AnnotationRateLimitBurst, rawBurst)
+		}
+	} else if burst > math.MaxUint32 {
+		burst = math.MaxUint32
+	}
+
+	return &RateLimit{Rate: rate, Burst: uint32(burst)}, nil
+}
+
+// parsePositiveUint parses a base-10 unsigned integer of at most bitSize bits.
+func parsePositiveUint(raw string, bitSize int) (uint64, error) {
+	return strconv.ParseUint(strings.TrimSpace(raw), 10, bitSize)
+}
+
+// rateLimitChanged compares the normalised forms. Callers must normalise both
+// sides first; the controller and the ingress share the same canonical form.
+func rateLimitChanged(existing, desired *RateLimit) bool {
+	if existing == nil || desired == nil {
+		return existing != desired
+	}
+	return existing.Rate != desired.Rate || existing.Burst != desired.Burst
+}
 
 // AllowedGeos parses the allowed-geos annotation into normalised ISO-3166
 // alpha-2 country codes. Invalid or empty entries are dropped; a missing

@@ -133,18 +133,75 @@ func (x *Destination) GetAddr() string {
 	return ""
 }
 
+// RateLimit caps the number of new connections per source IP for a
+// LoadBalancer Service. Rate is the sustained number of new connections per
+// second; burst is the token-bucket capacity. A burst of zero means "use the
+// rate".
+type RateLimit struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Rate          uint64                 `protobuf:"varint,1,opt,name=rate,proto3" json:"rate,omitempty"`
+	Burst         uint32                 `protobuf:"varint,2,opt,name=burst,proto3" json:"burst,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RateLimit) Reset() {
+	*x = RateLimit{}
+	mi := &file_router_v1_router_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RateLimit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RateLimit) ProtoMessage() {}
+
+func (x *RateLimit) ProtoReflect() protoreflect.Message {
+	mi := &file_router_v1_router_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RateLimit.ProtoReflect.Descriptor instead.
+func (*RateLimit) Descriptor() ([]byte, []int) {
+	return file_router_v1_router_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RateLimit) GetRate() uint64 {
+	if x != nil {
+		return x.Rate
+	}
+	return 0
+}
+
+func (x *RateLimit) GetBurst() uint32 {
+	if x != nil {
+		return x.Burst
+	}
+	return 0
+}
+
 type CreateLoadBalancerRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ServiceKey    string                 `protobuf:"bytes,1,opt,name=service_key,json=serviceKey,proto3" json:"service_key,omitempty"`
 	Ports         []*PortMapping         `protobuf:"bytes,2,rep,name=ports,proto3" json:"ports,omitempty"`
 	AllowedGeos   []string               `protobuf:"bytes,3,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"` // ISO-3166 alpha-2 country codes
+	RateLimit     *RateLimit             `protobuf:"bytes,4,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`       // absent disables rate limiting
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateLoadBalancerRequest) Reset() {
 	*x = CreateLoadBalancerRequest{}
-	mi := &file_router_v1_router_proto_msgTypes[2]
+	mi := &file_router_v1_router_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -156,7 +213,7 @@ func (x *CreateLoadBalancerRequest) String() string {
 func (*CreateLoadBalancerRequest) ProtoMessage() {}
 
 func (x *CreateLoadBalancerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[2]
+	mi := &file_router_v1_router_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -169,7 +226,7 @@ func (x *CreateLoadBalancerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateLoadBalancerRequest.ProtoReflect.Descriptor instead.
 func (*CreateLoadBalancerRequest) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{2}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CreateLoadBalancerRequest) GetServiceKey() string {
@@ -193,6 +250,13 @@ func (x *CreateLoadBalancerRequest) GetAllowedGeos() []string {
 	return nil
 }
 
+func (x *CreateLoadBalancerRequest) GetRateLimit() *RateLimit {
+	if x != nil {
+		return x.RateLimit
+	}
+	return nil
+}
+
 type CreateLoadBalancerResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AssignedIp    string                 `protobuf:"bytes,1,opt,name=assigned_ip,json=assignedIp,proto3" json:"assigned_ip,omitempty"`
@@ -202,7 +266,7 @@ type CreateLoadBalancerResponse struct {
 
 func (x *CreateLoadBalancerResponse) Reset() {
 	*x = CreateLoadBalancerResponse{}
-	mi := &file_router_v1_router_proto_msgTypes[3]
+	mi := &file_router_v1_router_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -214,7 +278,7 @@ func (x *CreateLoadBalancerResponse) String() string {
 func (*CreateLoadBalancerResponse) ProtoMessage() {}
 
 func (x *CreateLoadBalancerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[3]
+	mi := &file_router_v1_router_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -227,7 +291,7 @@ func (x *CreateLoadBalancerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateLoadBalancerResponse.ProtoReflect.Descriptor instead.
 func (*CreateLoadBalancerResponse) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{3}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CreateLoadBalancerResponse) GetAssignedIp() string {
@@ -242,13 +306,14 @@ type UpdateLoadBalancerRequest struct {
 	ServiceKey    string                 `protobuf:"bytes,1,opt,name=service_key,json=serviceKey,proto3" json:"service_key,omitempty"`
 	Ports         []*PortMapping         `protobuf:"bytes,2,rep,name=ports,proto3" json:"ports,omitempty"`
 	AllowedGeos   []string               `protobuf:"bytes,3,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"` // ISO-3166 alpha-2 country codes
+	RateLimit     *RateLimit             `protobuf:"bytes,4,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`       // absent clears the rate limit
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpdateLoadBalancerRequest) Reset() {
 	*x = UpdateLoadBalancerRequest{}
-	mi := &file_router_v1_router_proto_msgTypes[4]
+	mi := &file_router_v1_router_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -260,7 +325,7 @@ func (x *UpdateLoadBalancerRequest) String() string {
 func (*UpdateLoadBalancerRequest) ProtoMessage() {}
 
 func (x *UpdateLoadBalancerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[4]
+	mi := &file_router_v1_router_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -273,7 +338,7 @@ func (x *UpdateLoadBalancerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateLoadBalancerRequest.ProtoReflect.Descriptor instead.
 func (*UpdateLoadBalancerRequest) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{4}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *UpdateLoadBalancerRequest) GetServiceKey() string {
@@ -297,6 +362,13 @@ func (x *UpdateLoadBalancerRequest) GetAllowedGeos() []string {
 	return nil
 }
 
+func (x *UpdateLoadBalancerRequest) GetRateLimit() *RateLimit {
+	if x != nil {
+		return x.RateLimit
+	}
+	return nil
+}
+
 type UpdateLoadBalancerResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -305,7 +377,7 @@ type UpdateLoadBalancerResponse struct {
 
 func (x *UpdateLoadBalancerResponse) Reset() {
 	*x = UpdateLoadBalancerResponse{}
-	mi := &file_router_v1_router_proto_msgTypes[5]
+	mi := &file_router_v1_router_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -317,7 +389,7 @@ func (x *UpdateLoadBalancerResponse) String() string {
 func (*UpdateLoadBalancerResponse) ProtoMessage() {}
 
 func (x *UpdateLoadBalancerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[5]
+	mi := &file_router_v1_router_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -330,7 +402,7 @@ func (x *UpdateLoadBalancerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateLoadBalancerResponse.ProtoReflect.Descriptor instead.
 func (*UpdateLoadBalancerResponse) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{5}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{6}
 }
 
 type DeleteLoadBalancerRequest struct {
@@ -342,7 +414,7 @@ type DeleteLoadBalancerRequest struct {
 
 func (x *DeleteLoadBalancerRequest) Reset() {
 	*x = DeleteLoadBalancerRequest{}
-	mi := &file_router_v1_router_proto_msgTypes[6]
+	mi := &file_router_v1_router_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -354,7 +426,7 @@ func (x *DeleteLoadBalancerRequest) String() string {
 func (*DeleteLoadBalancerRequest) ProtoMessage() {}
 
 func (x *DeleteLoadBalancerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[6]
+	mi := &file_router_v1_router_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -367,7 +439,7 @@ func (x *DeleteLoadBalancerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteLoadBalancerRequest.ProtoReflect.Descriptor instead.
 func (*DeleteLoadBalancerRequest) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{6}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DeleteLoadBalancerRequest) GetServiceKey() string {
@@ -385,7 +457,7 @@ type DeleteLoadBalancerResponse struct {
 
 func (x *DeleteLoadBalancerResponse) Reset() {
 	*x = DeleteLoadBalancerResponse{}
-	mi := &file_router_v1_router_proto_msgTypes[7]
+	mi := &file_router_v1_router_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -397,7 +469,7 @@ func (x *DeleteLoadBalancerResponse) String() string {
 func (*DeleteLoadBalancerResponse) ProtoMessage() {}
 
 func (x *DeleteLoadBalancerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[7]
+	mi := &file_router_v1_router_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -410,7 +482,7 @@ func (x *DeleteLoadBalancerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteLoadBalancerResponse.ProtoReflect.Descriptor instead.
 func (*DeleteLoadBalancerResponse) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{7}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{8}
 }
 
 type GetLoadBalancerRequest struct {
@@ -422,7 +494,7 @@ type GetLoadBalancerRequest struct {
 
 func (x *GetLoadBalancerRequest) Reset() {
 	*x = GetLoadBalancerRequest{}
-	mi := &file_router_v1_router_proto_msgTypes[8]
+	mi := &file_router_v1_router_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -434,7 +506,7 @@ func (x *GetLoadBalancerRequest) String() string {
 func (*GetLoadBalancerRequest) ProtoMessage() {}
 
 func (x *GetLoadBalancerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[8]
+	mi := &file_router_v1_router_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -447,7 +519,7 @@ func (x *GetLoadBalancerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLoadBalancerRequest.ProtoReflect.Descriptor instead.
 func (*GetLoadBalancerRequest) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{8}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetLoadBalancerRequest) GetServiceKey() string {
@@ -465,13 +537,14 @@ type GetLoadBalancerResponse struct {
 	DhcpAcquired  bool                   `protobuf:"varint,4,opt,name=dhcp_acquired,json=dhcpAcquired,proto3" json:"dhcp_acquired,omitempty"`
 	InterfaceName string                 `protobuf:"bytes,5,opt,name=interface_name,json=interfaceName,proto3" json:"interface_name,omitempty"`
 	AllowedGeos   []string               `protobuf:"bytes,6,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"` // ISO-3166 alpha-2 country codes
+	RateLimit     *RateLimit             `protobuf:"bytes,7,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`       // absent means rate limiting is disabled
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetLoadBalancerResponse) Reset() {
 	*x = GetLoadBalancerResponse{}
-	mi := &file_router_v1_router_proto_msgTypes[9]
+	mi := &file_router_v1_router_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -483,7 +556,7 @@ func (x *GetLoadBalancerResponse) String() string {
 func (*GetLoadBalancerResponse) ProtoMessage() {}
 
 func (x *GetLoadBalancerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[9]
+	mi := &file_router_v1_router_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -496,7 +569,7 @@ func (x *GetLoadBalancerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLoadBalancerResponse.ProtoReflect.Descriptor instead.
 func (*GetLoadBalancerResponse) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{9}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetLoadBalancerResponse) GetServiceKey() string {
@@ -541,6 +614,13 @@ func (x *GetLoadBalancerResponse) GetAllowedGeos() []string {
 	return nil
 }
 
+func (x *GetLoadBalancerResponse) GetRateLimit() *RateLimit {
+	if x != nil {
+		return x.RateLimit
+	}
+	return nil
+}
+
 type ListLoadBalancersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -549,7 +629,7 @@ type ListLoadBalancersRequest struct {
 
 func (x *ListLoadBalancersRequest) Reset() {
 	*x = ListLoadBalancersRequest{}
-	mi := &file_router_v1_router_proto_msgTypes[10]
+	mi := &file_router_v1_router_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -561,7 +641,7 @@ func (x *ListLoadBalancersRequest) String() string {
 func (*ListLoadBalancersRequest) ProtoMessage() {}
 
 func (x *ListLoadBalancersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[10]
+	mi := &file_router_v1_router_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -574,7 +654,7 @@ func (x *ListLoadBalancersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLoadBalancersRequest.ProtoReflect.Descriptor instead.
 func (*ListLoadBalancersRequest) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{10}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{11}
 }
 
 type ListLoadBalancersResponse struct {
@@ -586,7 +666,7 @@ type ListLoadBalancersResponse struct {
 
 func (x *ListLoadBalancersResponse) Reset() {
 	*x = ListLoadBalancersResponse{}
-	mi := &file_router_v1_router_proto_msgTypes[11]
+	mi := &file_router_v1_router_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -598,7 +678,7 @@ func (x *ListLoadBalancersResponse) String() string {
 func (*ListLoadBalancersResponse) ProtoMessage() {}
 
 func (x *ListLoadBalancersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[11]
+	mi := &file_router_v1_router_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -611,7 +691,7 @@ func (x *ListLoadBalancersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLoadBalancersResponse.ProtoReflect.Descriptor instead.
 func (*ListLoadBalancersResponse) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{11}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ListLoadBalancersResponse) GetLoadBalancers() []*GetLoadBalancerResponse {
@@ -629,7 +709,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_router_v1_router_proto_msgTypes[12]
+	mi := &file_router_v1_router_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -641,7 +721,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[12]
+	mi := &file_router_v1_router_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -654,7 +734,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{12}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{13}
 }
 
 type HealthResponse struct {
@@ -668,7 +748,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_router_v1_router_proto_msgTypes[13]
+	mi := &file_router_v1_router_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -680,7 +760,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_router_v1_router_proto_msgTypes[13]
+	mi := &file_router_v1_router_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -693,7 +773,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_router_v1_router_proto_rawDescGZIP(), []int{13}
+	return file_router_v1_router_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *HealthResponse) GetHealthy() bool {
@@ -728,20 +808,27 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x03dst\x18\x03 \x03(\v2\x16.router.v1.DestinationR\x03dst\"5\n" +
 	"\vDestination\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\rR\x04port\x12\x12\n" +
-	"\x04addr\x18\x02 \x01(\tR\x04addr\"\x8d\x01\n" +
+	"\x04addr\x18\x02 \x01(\tR\x04addr\"5\n" +
+	"\tRateLimit\x12\x12\n" +
+	"\x04rate\x18\x01 \x01(\x04R\x04rate\x12\x14\n" +
+	"\x05burst\x18\x02 \x01(\rR\x05burst\"\xc2\x01\n" +
 	"\x19CreateLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12,\n" +
 	"\x05ports\x18\x02 \x03(\v2\x16.router.v1.PortMappingR\x05ports\x12!\n" +
-	"\fallowed_geos\x18\x03 \x03(\tR\vallowedGeos\"=\n" +
+	"\fallowed_geos\x18\x03 \x03(\tR\vallowedGeos\x123\n" +
+	"\n" +
+	"rate_limit\x18\x04 \x01(\v2\x14.router.v1.RateLimitR\trateLimit\"=\n" +
 	"\x1aCreateLoadBalancerResponse\x12\x1f\n" +
 	"\vassigned_ip\x18\x01 \x01(\tR\n" +
-	"assignedIp\"\x8d\x01\n" +
+	"assignedIp\"\xc2\x01\n" +
 	"\x19UpdateLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12,\n" +
 	"\x05ports\x18\x02 \x03(\v2\x16.router.v1.PortMappingR\x05ports\x12!\n" +
-	"\fallowed_geos\x18\x03 \x03(\tR\vallowedGeos\"\x1c\n" +
+	"\fallowed_geos\x18\x03 \x03(\tR\vallowedGeos\x123\n" +
+	"\n" +
+	"rate_limit\x18\x04 \x01(\v2\x14.router.v1.RateLimitR\trateLimit\"\x1c\n" +
 	"\x1aUpdateLoadBalancerResponse\"<\n" +
 	"\x19DeleteLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
@@ -749,7 +836,7 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x1aDeleteLoadBalancerResponse\"9\n" +
 	"\x16GetLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
-	"serviceKey\"\xf8\x01\n" +
+	"serviceKey\"\xad\x02\n" +
 	"\x17GetLoadBalancerResponse\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12\x1f\n" +
@@ -758,7 +845,9 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x05ports\x18\x03 \x03(\v2\x16.router.v1.PortMappingR\x05ports\x12#\n" +
 	"\rdhcp_acquired\x18\x04 \x01(\bR\fdhcpAcquired\x12%\n" +
 	"\x0einterface_name\x18\x05 \x01(\tR\rinterfaceName\x12!\n" +
-	"\fallowed_geos\x18\x06 \x03(\tR\vallowedGeos\"\x1a\n" +
+	"\fallowed_geos\x18\x06 \x03(\tR\vallowedGeos\x123\n" +
+	"\n" +
+	"rate_limit\x18\a \x01(\v2\x14.router.v1.RateLimitR\trateLimit\"\x1a\n" +
 	"\x18ListLoadBalancersRequest\"f\n" +
 	"\x19ListLoadBalancersResponse\x12I\n" +
 	"\x0eload_balancers\x18\x01 \x03(\v2\".router.v1.GetLoadBalancerResponseR\rloadBalancers\"\x0f\n" +
@@ -787,46 +876,50 @@ func file_router_v1_router_proto_rawDescGZIP() []byte {
 	return file_router_v1_router_proto_rawDescData
 }
 
-var file_router_v1_router_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_router_v1_router_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_router_v1_router_proto_goTypes = []any{
 	(*PortMapping)(nil),                // 0: router.v1.PortMapping
 	(*Destination)(nil),                // 1: router.v1.Destination
-	(*CreateLoadBalancerRequest)(nil),  // 2: router.v1.CreateLoadBalancerRequest
-	(*CreateLoadBalancerResponse)(nil), // 3: router.v1.CreateLoadBalancerResponse
-	(*UpdateLoadBalancerRequest)(nil),  // 4: router.v1.UpdateLoadBalancerRequest
-	(*UpdateLoadBalancerResponse)(nil), // 5: router.v1.UpdateLoadBalancerResponse
-	(*DeleteLoadBalancerRequest)(nil),  // 6: router.v1.DeleteLoadBalancerRequest
-	(*DeleteLoadBalancerResponse)(nil), // 7: router.v1.DeleteLoadBalancerResponse
-	(*GetLoadBalancerRequest)(nil),     // 8: router.v1.GetLoadBalancerRequest
-	(*GetLoadBalancerResponse)(nil),    // 9: router.v1.GetLoadBalancerResponse
-	(*ListLoadBalancersRequest)(nil),   // 10: router.v1.ListLoadBalancersRequest
-	(*ListLoadBalancersResponse)(nil),  // 11: router.v1.ListLoadBalancersResponse
-	(*HealthRequest)(nil),              // 12: router.v1.HealthRequest
-	(*HealthResponse)(nil),             // 13: router.v1.HealthResponse
+	(*RateLimit)(nil),                  // 2: router.v1.RateLimit
+	(*CreateLoadBalancerRequest)(nil),  // 3: router.v1.CreateLoadBalancerRequest
+	(*CreateLoadBalancerResponse)(nil), // 4: router.v1.CreateLoadBalancerResponse
+	(*UpdateLoadBalancerRequest)(nil),  // 5: router.v1.UpdateLoadBalancerRequest
+	(*UpdateLoadBalancerResponse)(nil), // 6: router.v1.UpdateLoadBalancerResponse
+	(*DeleteLoadBalancerRequest)(nil),  // 7: router.v1.DeleteLoadBalancerRequest
+	(*DeleteLoadBalancerResponse)(nil), // 8: router.v1.DeleteLoadBalancerResponse
+	(*GetLoadBalancerRequest)(nil),     // 9: router.v1.GetLoadBalancerRequest
+	(*GetLoadBalancerResponse)(nil),    // 10: router.v1.GetLoadBalancerResponse
+	(*ListLoadBalancersRequest)(nil),   // 11: router.v1.ListLoadBalancersRequest
+	(*ListLoadBalancersResponse)(nil),  // 12: router.v1.ListLoadBalancersResponse
+	(*HealthRequest)(nil),              // 13: router.v1.HealthRequest
+	(*HealthResponse)(nil),             // 14: router.v1.HealthResponse
 }
 var file_router_v1_router_proto_depIdxs = []int32{
 	1,  // 0: router.v1.PortMapping.dst:type_name -> router.v1.Destination
 	0,  // 1: router.v1.CreateLoadBalancerRequest.ports:type_name -> router.v1.PortMapping
-	0,  // 2: router.v1.UpdateLoadBalancerRequest.ports:type_name -> router.v1.PortMapping
-	0,  // 3: router.v1.GetLoadBalancerResponse.ports:type_name -> router.v1.PortMapping
-	9,  // 4: router.v1.ListLoadBalancersResponse.load_balancers:type_name -> router.v1.GetLoadBalancerResponse
-	2,  // 5: router.v1.RouterService.CreateLoadBalancer:input_type -> router.v1.CreateLoadBalancerRequest
-	4,  // 6: router.v1.RouterService.UpdateLoadBalancer:input_type -> router.v1.UpdateLoadBalancerRequest
-	6,  // 7: router.v1.RouterService.DeleteLoadBalancer:input_type -> router.v1.DeleteLoadBalancerRequest
-	8,  // 8: router.v1.RouterService.GetLoadBalancer:input_type -> router.v1.GetLoadBalancerRequest
-	10, // 9: router.v1.RouterService.ListLoadBalancers:input_type -> router.v1.ListLoadBalancersRequest
-	12, // 10: router.v1.RouterService.Health:input_type -> router.v1.HealthRequest
-	3,  // 11: router.v1.RouterService.CreateLoadBalancer:output_type -> router.v1.CreateLoadBalancerResponse
-	5,  // 12: router.v1.RouterService.UpdateLoadBalancer:output_type -> router.v1.UpdateLoadBalancerResponse
-	7,  // 13: router.v1.RouterService.DeleteLoadBalancer:output_type -> router.v1.DeleteLoadBalancerResponse
-	9,  // 14: router.v1.RouterService.GetLoadBalancer:output_type -> router.v1.GetLoadBalancerResponse
-	11, // 15: router.v1.RouterService.ListLoadBalancers:output_type -> router.v1.ListLoadBalancersResponse
-	13, // 16: router.v1.RouterService.Health:output_type -> router.v1.HealthResponse
-	11, // [11:17] is the sub-list for method output_type
-	5,  // [5:11] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	2,  // 2: router.v1.CreateLoadBalancerRequest.rate_limit:type_name -> router.v1.RateLimit
+	0,  // 3: router.v1.UpdateLoadBalancerRequest.ports:type_name -> router.v1.PortMapping
+	2,  // 4: router.v1.UpdateLoadBalancerRequest.rate_limit:type_name -> router.v1.RateLimit
+	0,  // 5: router.v1.GetLoadBalancerResponse.ports:type_name -> router.v1.PortMapping
+	2,  // 6: router.v1.GetLoadBalancerResponse.rate_limit:type_name -> router.v1.RateLimit
+	10, // 7: router.v1.ListLoadBalancersResponse.load_balancers:type_name -> router.v1.GetLoadBalancerResponse
+	3,  // 8: router.v1.RouterService.CreateLoadBalancer:input_type -> router.v1.CreateLoadBalancerRequest
+	5,  // 9: router.v1.RouterService.UpdateLoadBalancer:input_type -> router.v1.UpdateLoadBalancerRequest
+	7,  // 10: router.v1.RouterService.DeleteLoadBalancer:input_type -> router.v1.DeleteLoadBalancerRequest
+	9,  // 11: router.v1.RouterService.GetLoadBalancer:input_type -> router.v1.GetLoadBalancerRequest
+	11, // 12: router.v1.RouterService.ListLoadBalancers:input_type -> router.v1.ListLoadBalancersRequest
+	13, // 13: router.v1.RouterService.Health:input_type -> router.v1.HealthRequest
+	4,  // 14: router.v1.RouterService.CreateLoadBalancer:output_type -> router.v1.CreateLoadBalancerResponse
+	6,  // 15: router.v1.RouterService.UpdateLoadBalancer:output_type -> router.v1.UpdateLoadBalancerResponse
+	8,  // 16: router.v1.RouterService.DeleteLoadBalancer:output_type -> router.v1.DeleteLoadBalancerResponse
+	10, // 17: router.v1.RouterService.GetLoadBalancer:output_type -> router.v1.GetLoadBalancerResponse
+	12, // 18: router.v1.RouterService.ListLoadBalancers:output_type -> router.v1.ListLoadBalancersResponse
+	14, // 19: router.v1.RouterService.Health:output_type -> router.v1.HealthResponse
+	14, // [14:20] is the sub-list for method output_type
+	8,  // [8:14] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_router_v1_router_proto_init() }
@@ -840,7 +933,7 @@ func file_router_v1_router_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_router_v1_router_proto_rawDesc), len(file_router_v1_router_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

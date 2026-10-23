@@ -257,6 +257,7 @@ type setStore interface {
 	AddSet(set *nftables.Set, elements []nftables.SetElement) error
 	FlushSet(set *nftables.Set)
 	SetAddElements(set *nftables.Set, elements []nftables.SetElement) error
+	DelSet(set *nftables.Set)
 }
 
 func geoSetName(sn string) string { return geoSetPrefix + sn }

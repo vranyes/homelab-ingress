@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log/slog"
+	"math"
 	"net"
 	"regexp"
 	"strings"
@@ -55,11 +56,17 @@ func (s *RouterServer) CreateLoadBalancer(ctx context.Context, req *routerv1.Cre
 		return nil, err
 	}
 
+	rateLimit, err := rateLimitFromProto(req.RateLimit)
+	if err != nil {
+		return nil, err
+	}
+
 	ports := protoPortsToState(req.Ports)
 	svc := &state.LBService{
 		ServiceName: req.ServiceKey,
 		Targets:     ports,
 		AllowedGeos: geos,
+		RateLimit:   rateLimit,
 	}
 	s.stateData.UpdateService(svc)
 
@@ -86,9 +93,18 @@ func (s *RouterServer) UpdateLoadBalancer(ctx context.Context, req *routerv1.Upd
 		return nil, err
 	}
 
-	svc.Targets = protoPortsToState(req.Ports)
-	svc.AllowedGeos = geos
-	s.stateData.UpdateService(svc)
+	rateLimit, err := rateLimitFromProto(req.RateLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Mutate a clone: the pointer returned by GetService is owned by the
+	// state and may be read concurrently by Clone/List.
+	updated := svc.Clone()
+	updated.Targets = protoPortsToState(req.Ports)
+	updated.AllowedGeos = geos
+	updated.RateLimit = rateLimit
+	s.stateData.UpdateService(updated)
 
 	s.logger.Info("load balancer updated", "service_key", req.ServiceKey)
 	return &routerv1.UpdateLoadBalancerResponse{}, nil
@@ -127,6 +143,7 @@ func (s *RouterServer) GetLoadBalancer(ctx context.Context, req *routerv1.GetLoa
 		ServiceKey:  req.ServiceKey,
 		Ports:       statePortsToProto(svc.Targets),
 		AllowedGeos: svc.AllowedGeos,
+		RateLimit:   stateRateLimitToProto(svc.RateLimit),
 	}
 	if svc.SourceAddress != nil {
 		resp.AssignedIp = svc.SourceAddress.String()
@@ -152,6 +169,7 @@ func (s *RouterServer) ListLoadBalancers(ctx context.Context, req *routerv1.List
 			ServiceKey:  key,
 			Ports:       statePortsToProto(svc.Targets),
 			AllowedGeos: svc.AllowedGeos,
+			RateLimit:   stateRateLimitToProto(svc.RateLimit),
 		}
 		// Mirror GetLoadBalancer: a DHCP-pending service has no source
 		// address yet. net.IP(nil).String() returns "<nil>", which the
@@ -186,6 +204,33 @@ func (s *RouterServer) Health(ctx context.Context, req *routerv1.HealthRequest) 
 		Healthy:        true,
 		ActiveMacvlans: count,
 	}, nil
+}
+
+// rateLimitFromProto normalises the wire format. A zero burst means "use the
+// rate"; a zero rate is invalid because the kernel rejects a zero rate.
+func rateLimitFromProto(rl *routerv1.RateLimit) (*state.RateLimit, error) {
+	if rl == nil {
+		return nil, nil
+	}
+	if rl.Rate == 0 {
+		return nil, status.Error(codes.InvalidArgument, "rate_limit.rate must be greater than zero")
+	}
+	burst := rl.Burst
+	if burst == 0 {
+		if rl.Rate > math.MaxUint32 {
+			burst = math.MaxUint32
+		} else {
+			burst = uint32(rl.Rate)
+		}
+	}
+	return &state.RateLimit{Rate: rl.Rate, Burst: burst}, nil
+}
+
+func stateRateLimitToProto(rl *state.RateLimit) *routerv1.RateLimit {
+	if rl == nil {
+		return nil
+	}
+	return &routerv1.RateLimit{Rate: rl.Rate, Burst: rl.Burst}
 }
 
 // geosFromRequest normalises and validates the requested country codes.

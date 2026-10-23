@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -170,9 +171,38 @@ func CreateLBService(ctx context.Context, cl client.Client, ns, name string, ext
 // AnnotationAllowedGeos mirrors the controller's annotation name.
 const AnnotationAllowedGeos = "homelab-ingress.vranyes.com/allowed-geos"
 
+// AnnotationRateLimit and AnnotationRateLimitBurst mirror the controller's
+// rate-limit annotations.
+const (
+	AnnotationRateLimit      = "homelab-ingress.vranyes.com/rate-limit"
+	AnnotationRateLimitBurst = "homelab-ingress.vranyes.com/rate-limit-burst"
+)
+
 // CreateLBServiceWithGeos is CreateLBService with the allowed-geos annotation.
 // geos must already be normalised ISO-3166 alpha-2 codes.
 func CreateLBServiceWithGeos(ctx context.Context, cl client.Client, ns, name string, externalPort, targetPort int32, geos []string) error {
+	var ann map[string]string
+	if len(geos) > 0 {
+		ann = map[string]string{AnnotationAllowedGeos: strings.Join(geos, ",")}
+	}
+	return createLBService(ctx, cl, ns, name, externalPort, targetPort, ann)
+}
+
+// CreateLBServiceWithRateLimit is CreateLBService with the rate-limit
+// annotations. burst=0 means "use the rate".
+func CreateLBServiceWithRateLimit(ctx context.Context, cl client.Client, ns, name string, externalPort, targetPort int32, rate, burst uint64) error {
+	return createLBService(ctx, cl, ns, name, externalPort, targetPort, rateLimitAnnotations(rate, burst))
+}
+
+func rateLimitAnnotations(rate, burst uint64) map[string]string {
+	ann := map[string]string{AnnotationRateLimit: strconv.FormatUint(rate, 10)}
+	if burst > 0 {
+		ann[AnnotationRateLimitBurst] = strconv.FormatUint(burst, 10)
+	}
+	return ann
+}
+
+func createLBService(ctx context.Context, cl client.Client, ns, name string, externalPort, targetPort int32, annotations map[string]string) error {
 	labels := map[string]string{"app": name}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -192,13 +222,52 @@ func CreateLBServiceWithGeos(ctx context.Context, cl client.Client, ns, name str
 			}},
 		},
 	}
-	if len(geos) > 0 {
-		svc.Annotations = map[string]string{AnnotationAllowedGeos: strings.Join(geos, ",")}
+	if len(annotations) > 0 {
+		svc.Annotations = make(map[string]string, len(annotations))
+		for k, v := range annotations {
+			svc.Annotations[k] = v
+		}
 	}
 	if err := cl.Create(ctx, svc); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create lb service: %w", err)
 	}
 	return nil
+}
+
+// SetRateLimit replaces the rate-limit annotations on a Service. A nil rate
+// removes both annotations; a nil burst removes only the burst annotation.
+// Conflicts are retried because the controller patches status concurrently.
+func SetRateLimit(ctx context.Context, cl client.Client, ns, name string, rate, burst *uint64) error {
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		svc, err := GetService(ctx, cl, ns, name)
+		if err != nil {
+			return err
+		}
+		if svc.Annotations == nil {
+			svc.Annotations = make(map[string]string, 2)
+		}
+		if rate == nil {
+			delete(svc.Annotations, AnnotationRateLimit)
+			delete(svc.Annotations, AnnotationRateLimitBurst)
+		} else {
+			svc.Annotations[AnnotationRateLimit] = strconv.FormatUint(*rate, 10)
+			if burst == nil {
+				delete(svc.Annotations, AnnotationRateLimitBurst)
+			} else {
+				svc.Annotations[AnnotationRateLimitBurst] = strconv.FormatUint(*burst, 10)
+			}
+		}
+		if err := cl.Update(ctx, svc); err != nil {
+			if apierrors.IsConflict(err) {
+				lastErr = err
+				continue
+			}
+			return fmt.Errorf("update rate-limit annotations: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("update rate-limit annotations after retries: %w", lastErr)
 }
 
 // DeleteService deletes a Service by name. Returns nil if not found.

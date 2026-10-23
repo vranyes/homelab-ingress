@@ -197,9 +197,20 @@ func newHealthCmd(cf *cliFlags) *cobra.Command {
 	}
 }
 
+// rateLimitForFlags builds the proto value for --rate/--burst. A zero rate
+// disables the limit; a zero burst means "use the rate".
+func rateLimitForFlags(rate uint64, burst uint32) *routerv1.RateLimit {
+	if rate == 0 {
+		return nil
+	}
+	return &routerv1.RateLimit{Rate: rate, Burst: burst}
+}
+
 func newCreateCmd(cf *cliFlags) *cobra.Command {
 	var service string
 	var ports stringSliceFlag
+	var rate uint64
+	var burst uint32
 
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -224,6 +235,7 @@ func newCreateCmd(cf *cliFlags) *cobra.Command {
 			resp, err := client.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
 				ServiceKey: service,
 				Ports:      parsedPorts,
+				RateLimit:  rateLimitForFlags(rate, burst),
 			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "create failed: %v\n", err)
@@ -237,6 +249,8 @@ func newCreateCmd(cf *cliFlags) *cobra.Command {
 
 	cmd.Flags().StringVar(&service, "service", "", "Service key (e.g. default/myapp)")
 	cmd.Flags().Var(&ports, "port", "Port mapping: protocol,external_port,target_ip:target_port,... (can be specified multiple times)")
+	cmd.Flags().Uint64Var(&rate, "rate", 0, "New connections per second per source IP (0 disables)")
+	cmd.Flags().Uint32Var(&burst, "burst", 0, "Token-bucket burst (0 uses the rate)")
 
 	return cmd
 }
@@ -244,6 +258,8 @@ func newCreateCmd(cf *cliFlags) *cobra.Command {
 func newUpdateCmd(cf *cliFlags) *cobra.Command {
 	var service string
 	var ports stringSliceFlag
+	var rate uint64
+	var burst uint32
 
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -268,6 +284,7 @@ func newUpdateCmd(cf *cliFlags) *cobra.Command {
 			_, err := client.UpdateLoadBalancer(context.Background(), &routerv1.UpdateLoadBalancerRequest{
 				ServiceKey: service,
 				Ports:      parsedPorts,
+				RateLimit:  rateLimitForFlags(rate, burst),
 			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "update failed: %v\n", err)
@@ -280,6 +297,8 @@ func newUpdateCmd(cf *cliFlags) *cobra.Command {
 
 	cmd.Flags().StringVar(&service, "service", "", "Service key (e.g. default/myapp)")
 	cmd.Flags().Var(&ports, "port", "Port mapping: protocol,external_port,target_ip:target_port,... (can be specified multiple times)")
+	cmd.Flags().Uint64Var(&rate, "rate", 0, "New connections per second per source IP (0 clears the limit)")
+	cmd.Flags().Uint32Var(&burst, "burst", 0, "Token-bucket burst (0 uses the rate)")
 
 	return cmd
 }

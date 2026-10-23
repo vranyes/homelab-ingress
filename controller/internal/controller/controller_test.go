@@ -44,37 +44,42 @@ func otherClass() *string      { return strptr("other-class") }
 // stubRouter is a fake router.Client. NotFound on Get drives the
 // create branch; cannedIP is handed out on Create.
 type stubRouter struct {
-	entries        map[string]*router.ServiceEntry
-	cannedIP       string
-	createCalls    []string
-	updateCalls    []string
-	deleteCalls    []string
-	lastCreateGeos []string
-	lastUpdateGeos []string
-	updateErr      error
+	entries             map[string]*router.ServiceEntry
+	cannedIP            string
+	createCalls         []string
+	updateCalls         []string
+	deleteCalls         []string
+	lastCreateGeos      []string
+	lastUpdateGeos      []string
+	lastCreateRateLimit *router.RateLimit
+	lastUpdateRateLimit *router.RateLimit
+	updateErr           error
 }
 
 func newStubRouter(ip string) *stubRouter {
 	return &stubRouter{entries: map[string]*router.ServiceEntry{}, cannedIP: ip}
 }
 
-func (s *stubRouter) Create(_ context.Context, key string, ports []router.PortMapping, geos []string) (*router.ServiceEntry, error) {
+func (s *stubRouter) Create(_ context.Context, key string, ports []router.PortMapping, geos []string, rateLimit *router.RateLimit) (*router.ServiceEntry, error) {
 	s.createCalls = append(s.createCalls, key)
 	s.lastCreateGeos = append([]string(nil), geos...)
-	e := &router.ServiceEntry{ServiceKey: key, AssignedIP: s.cannedIP, Ports: ports, AllowedGeos: geos}
+	s.lastCreateRateLimit = rateLimit
+	e := &router.ServiceEntry{ServiceKey: key, AssignedIP: s.cannedIP, Ports: ports, AllowedGeos: geos, RateLimit: rateLimit}
 	s.entries[key] = e
 	return e, nil
 }
 
-func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMapping, geos []string) error {
+func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMapping, geos []string, rateLimit *router.RateLimit) error {
 	s.updateCalls = append(s.updateCalls, key)
 	s.lastUpdateGeos = append([]string(nil), geos...)
+	s.lastUpdateRateLimit = rateLimit
 	if s.updateErr != nil {
 		return s.updateErr
 	}
 	if e, ok := s.entries[key]; ok {
 		e.Ports = ports
 		e.AllowedGeos = geos
+		e.RateLimit = rateLimit
 	}
 	return nil
 }

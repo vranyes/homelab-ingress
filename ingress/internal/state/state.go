@@ -38,6 +38,14 @@ type LBService struct {
 	SourceMask    net.IPMask       `json:"source_mask,omitempty"`
 	Targets       []LBTarget       `json:"targets"`
 	AllowedGeos   []string         `json:"allowed_geos,omitempty"`
+	RateLimit     *RateLimit       `json:"rate_limit,omitempty"`
+}
+
+// RateLimit caps new connections per source IP. Rate is the sustained number
+// of new connections per second; Burst is the token-bucket capacity.
+type RateLimit struct {
+	Rate  uint64 `json:"rate"`
+	Burst uint32 `json:"burst"`
 }
 
 func (s *LBService) String() string {
@@ -72,6 +80,10 @@ func (s *LBService) Clone() *LBService {
 	if s.AllowedGeos != nil {
 		cpy.AllowedGeos = make([]string, len(s.AllowedGeos))
 		copy(cpy.AllowedGeos, s.AllowedGeos)
+	}
+	if s.RateLimit != nil {
+		rl := *s.RateLimit
+		cpy.RateLimit = &rl
 	}
 	cpy.Targets = make([]LBTarget, len(s.Targets))
 	for i, t := range s.Targets {

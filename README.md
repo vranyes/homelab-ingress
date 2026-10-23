@@ -14,6 +14,7 @@ Basically it's an NLB for your homelab but w/o multi AZ (duh).
 - A Kubernetes controller implementing a homelab-ingress LoadBalancer class.
 - Country-based access control per LoadBalancer Service (MaxMind GeoLite2 or
   free DB-IP Lite; DB-IP needs no account or key).
+- Per-client new-connection rate limiting per LoadBalancer Service.
 - A cli for interacting with the ingress service.
 - Easy to manage masquerade rules for "on-prem" traffic.
 
@@ -37,6 +38,26 @@ geoip:
 
 See [docs/GEOBLOCKING_PLAN.md](docs/GEOBLOCKING_PLAN.md) and
 [ADR 0006](docs/adr/0006-dbip-lite-provider.md).
+
+## Rate limiting
+
+Cap new connections from a single source IP on a `LoadBalancer` Service:
+
+```yaml
+metadata:
+  annotations:
+    homelab-ingress.vranyes.com/rate-limit: "5"        # new connections/sec per client IP
+    homelab-ingress.vranyes.com/rate-limit-burst: "10" # optional; defaults to the rate
+```
+
+Only new connections are counted (TCP handshakes and the first packet of a UDP
+flow); established connections are never throttled. Excess packets are dropped
+in prerouting and counted per service. The bucket is shared across all ports of
+the Service, and is applied after geo-blocking and before DNAT. A change to
+either annotation takes effect live and starts a fresh bucket; removing the
+`rate-limit` annotation removes the limit.
+
+See [ADR 0007](docs/adr/0007-per-client-connection-rate-limiting.md).
 
 ## OpenWrt
 

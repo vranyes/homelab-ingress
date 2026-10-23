@@ -219,10 +219,11 @@ func AssertGeoSetExists(serviceKey string) error {
 type RuleKind string
 
 const (
-	RuleKindOther   RuleKind = "other"
-	RuleKindGeoDeny RuleKind = "geo-deny"
-	RuleKindDNAT    RuleKind = "dnat"
-	RuleKindDrop    RuleKind = "drop"
+	RuleKindOther     RuleKind = "other"
+	RuleKindGeoDeny   RuleKind = "geo-deny"
+	RuleKindRateLimit RuleKind = "rate-limit"
+	RuleKindDNAT      RuleKind = "dnat"
+	RuleKindDrop      RuleKind = "drop"
 )
 
 // RuleInfo is a classified rule plus its counter.
@@ -287,6 +288,7 @@ func classifyExprs(exprs []expr.Any) RuleKind {
 	hasLookup := false
 	inverted := false
 	hasNAT := false
+	hasDynset := false
 	drops := false
 	for _, e := range exprs {
 		switch v := e.(type) {
@@ -297,6 +299,8 @@ func classifyExprs(exprs []expr.Any) RuleKind {
 			}
 		case *expr.NAT:
 			hasNAT = true
+		case *expr.Dynset:
+			hasDynset = true
 		case *expr.Verdict:
 			if v.Kind == expr.VerdictDrop {
 				drops = true
@@ -304,6 +308,11 @@ func classifyExprs(exprs []expr.Any) RuleKind {
 		}
 	}
 	switch {
+	// The rate-limit rule ends in a drop too, so it must be detected before
+	// the generic drop case; otherwise CounterFor(RuleKindDrop) would return
+	// the meter's counter instead of the final daddr drop.
+	case hasDynset:
+		return RuleKindRateLimit
 	case hasLookup && inverted:
 		return RuleKindGeoDeny
 	case hasNAT:
@@ -313,6 +322,117 @@ func classifyExprs(exprs []expr.Any) RuleKind {
 	default:
 		return RuleKindOther
 	}
+}
+
+// RateLimitSetPrefix mirrors nftables.rateLimitSetName: rl_<safeName>_<rate>_<burst>.
+const nftRateLimitPrefix = "rl_"
+
+// RateLimitSetNamePrefix returns the prefix shared by all rate-limit sets of a
+// service, regardless of its rate/burst (which are part of the name).
+func RateLimitSetNamePrefix(serviceKey string) string {
+	return nftRateLimitPrefix + safeNameNFT(serviceKey) + "_"
+}
+
+// RateLimitSets returns the rate-limit set names for a service.
+func RateLimitSets(serviceKey string) ([]string, error) {
+	conn, err := nftables.New()
+	if err != nil {
+		return nil, fmt.Errorf("open nftables: %w", err)
+	}
+	table, err := findTable(conn)
+	if err != nil {
+		return nil, err
+	}
+	sets, err := conn.GetSets(table)
+	if err != nil {
+		return nil, fmt.Errorf("get sets: %w", err)
+	}
+	prefix := RateLimitSetNamePrefix(serviceKey)
+	var out []string
+	for _, s := range sets {
+		if strings.HasPrefix(s.Name, prefix) {
+			out = append(out, s.Name)
+		}
+	}
+	return out, nil
+}
+
+// AssertRateLimitSetExists returns nil iff at least one rate-limit set exists
+// for the service.
+func AssertRateLimitSetExists(serviceKey string) error {
+	sets, err := RateLimitSets(serviceKey)
+	if err != nil {
+		return err
+	}
+	if len(sets) == 0 {
+		return fmt.Errorf("no rate-limit set for service %q (prefix %q)", serviceKey, RateLimitSetNamePrefix(serviceKey))
+	}
+	return nil
+}
+
+// AssertNoRateLimitSet returns nil iff no rate-limit set exists for the
+// service (e.g. after the annotations were removed).
+func AssertNoRateLimitSet(serviceKey string) error {
+	sets, err := RateLimitSets(serviceKey)
+	if err != nil {
+		return err
+	}
+	if len(sets) != 0 {
+		return fmt.Errorf("unexpected rate-limit sets for service %q: %v", serviceKey, sets)
+	}
+	return nil
+}
+
+// RateLimitParams is the limit encoded in the per-service meter rule.
+type RateLimitParams struct {
+	Rate  uint64
+	Burst uint32
+}
+
+// RateLimitParamsFor reads back the rate and burst from the Dynset/Limit
+// expressions in the service's prerouting chain.
+func RateLimitParamsFor(serviceKey string) (*RateLimitParams, error) {
+	conn, err := nftables.New()
+	if err != nil {
+		return nil, fmt.Errorf("open nftables: %w", err)
+	}
+	table, err := findTable(conn)
+	if err != nil {
+		return nil, err
+	}
+	chainName := LBChainName(serviceKey)
+	chains, err := conn.ListChainsOfTableFamily(nftables.TableFamilyIPv4)
+	if err != nil {
+		return nil, fmt.Errorf("list chains: %w", err)
+	}
+	var chain *nftables.Chain
+	for _, c := range chains {
+		if c.Name == chainName && c.Table != nil && c.Table.Name == nftTableName {
+			chain = c
+			break
+		}
+	}
+	if chain == nil {
+		return nil, fmt.Errorf("chain %q not found", chainName)
+	}
+	rules, err := conn.GetRules(table, chain)
+	if err != nil {
+		return nil, fmt.Errorf("get rules: %w", err)
+	}
+	for _, r := range rules {
+		for _, e := range r.Exprs {
+			d, ok := e.(*expr.Dynset)
+			if !ok {
+				continue
+			}
+			for _, de := range d.Exprs {
+				if lim, ok := de.(*expr.Limit); ok {
+					return &RateLimitParams{Rate: lim.Rate, Burst: lim.Burst}, nil
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("no rate-limit expression in chain %q", chainName)
 }
 
 // CountRuleKind returns how many rules of `kind` the chain has.

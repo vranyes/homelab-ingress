@@ -117,6 +117,11 @@ type Implementor interface {
 - **Forward chain** (forward, filter): accepts post-DNAT traffic to pod IPs/ports
 - **Postrouting chain**: masquerades outbound traffic
 - Supports single-destination DNAT and round-robin load balancing via nftables sets/maps
+- Per-service, per-source-IP new-connection rate limiting: a dynamic set
+  (`rl_<sn>_<rate>_<burst>`) holds one token bucket per client IP, and a
+  `meter`-style `limit rate over` expression drops excess packets. The set name
+  includes the configuration, so changing rate/burst starts a fresh bucket; idle
+  buckets expire after 10 minutes (see ADR 0007)
 
 ### Geo-blocking (`internal/geoip/` and `internal/geo/`)
 

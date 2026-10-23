@@ -244,6 +244,28 @@ func (m *Manager) planRules(c *nftables.Conn, ss setStore, table *nftables.Table
 		})
 	}
 
+	// Rate limiting sits after the geo deny (blocked countries must not
+	// consume set slots) and before DNAT (the DNAT branch accepts, which
+	// terminates the chain).
+	keepSet := ""
+	if service.RateLimit != nil {
+		keepSet = rateLimitSetName(sn, *service.RateLimit)
+	}
+	if err := removeStaleRateLimitSets(ss, table, sn, keepSet); err != nil {
+		return nil, fmt.Errorf("remove stale rate-limit sets: %w", err)
+	}
+	if service.RateLimit != nil {
+		set, err := ensureRateLimitSet(ss, table, sn, *service.RateLimit)
+		if err != nil {
+			return nil, fmt.Errorf("build rate-limit set: %w", err)
+		}
+		rules = append(rules, &nftables.Rule{
+			Table: table,
+			Chain: chain,
+			Exprs: buildRateLimitExprs(extIP, set, *service.RateLimit),
+		})
+	}
+
 	for _, target := range service.Targets {
 		var mapping = make(map[string]uint16, len(target.Dst))
 		for _, d := range target.Dst {

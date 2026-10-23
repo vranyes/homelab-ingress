@@ -21,8 +21,15 @@ type ServiceEntry struct {
 	AssignedIP   string
 	Ports        []PortMapping
 	AllowedGeos  []string
+	RateLimit    *RateLimit
 	DHCPAcquired bool
 	Interface    string
+}
+
+// RateLimit is the normalised per-source-IP new-connection limit.
+type RateLimit struct {
+	Rate  uint64
+	Burst uint32
 }
 
 type Destination struct {
@@ -43,8 +50,8 @@ type HealthStatus struct {
 }
 
 type Client interface {
-	Create(ctx context.Context, serviceKey string, ports []PortMapping, geos []string) (*ServiceEntry, error)
-	Update(ctx context.Context, serviceKey string, ports []PortMapping, geos []string) error
+	Create(ctx context.Context, serviceKey string, ports []PortMapping, geos []string, rateLimit *RateLimit) (*ServiceEntry, error)
+	Update(ctx context.Context, serviceKey string, ports []PortMapping, geos []string, rateLimit *RateLimit) error
 	Delete(ctx context.Context, serviceKey string) error
 	Get(ctx context.Context, serviceKey string) (*ServiceEntry, error)
 	List(ctx context.Context) ([]ServiceEntry, error)
@@ -103,11 +110,12 @@ func (t *tokenFileCredentials) RequireTransportSecurity() bool { return true }
 
 var _ credentials.PerRPCCredentials = (*tokenFileCredentials)(nil)
 
-func (c *GRPCClient) Create(ctx context.Context, serviceKey string, ports []PortMapping, geos []string) (*ServiceEntry, error) {
+func (c *GRPCClient) Create(ctx context.Context, serviceKey string, ports []PortMapping, geos []string, rateLimit *RateLimit) (*ServiceEntry, error) {
 	req := &routerv1.CreateLoadBalancerRequest{
 		ServiceKey:  serviceKey,
 		Ports:       toProtoPorts(ports),
 		AllowedGeos: geos,
+		RateLimit:   toProtoRateLimit(rateLimit),
 	}
 	resp, err := c.client.CreateLoadBalancer(ctx, req)
 	if err != nil {
@@ -118,14 +126,16 @@ func (c *GRPCClient) Create(ctx context.Context, serviceKey string, ports []Port
 		AssignedIP:  resp.AssignedIp,
 		Ports:       ports,
 		AllowedGeos: geos,
+		RateLimit:   rateLimit,
 	}, nil
 }
 
-func (c *GRPCClient) Update(ctx context.Context, serviceKey string, ports []PortMapping, geos []string) error {
+func (c *GRPCClient) Update(ctx context.Context, serviceKey string, ports []PortMapping, geos []string, rateLimit *RateLimit) error {
 	req := &routerv1.UpdateLoadBalancerRequest{
 		ServiceKey:  serviceKey,
 		Ports:       toProtoPorts(ports),
 		AllowedGeos: geos,
+		RateLimit:   toProtoRateLimit(rateLimit),
 	}
 	_, err := c.client.UpdateLoadBalancer(ctx, req)
 	return err
@@ -217,9 +227,24 @@ func fromProto(resp *routerv1.GetLoadBalancerResponse) *ServiceEntry {
 		AssignedIP:   resp.AssignedIp,
 		Ports:        ports,
 		AllowedGeos:  resp.AllowedGeos,
+		RateLimit:    fromProtoRateLimit(resp.RateLimit),
 		DHCPAcquired: resp.DhcpAcquired,
 		Interface:    resp.InterfaceName,
 	}
+}
+
+func toProtoRateLimit(rl *RateLimit) *routerv1.RateLimit {
+	if rl == nil {
+		return nil
+	}
+	return &routerv1.RateLimit{Rate: rl.Rate, Burst: rl.Burst}
+}
+
+func fromProtoRateLimit(rl *routerv1.RateLimit) *RateLimit {
+	if rl == nil {
+		return nil
+	}
+	return &RateLimit{Rate: rl.Rate, Burst: rl.Burst}
 }
 
 func IsErrNotFound(err error) bool {

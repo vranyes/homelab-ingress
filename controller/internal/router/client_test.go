@@ -41,6 +41,8 @@ type fakeServer struct {
 	deleteCalls []string
 	createGeos  map[string][]string
 	updateGeos  map[string][]string
+	createRate  map[string]*routerv1.RateLimit
+	updateRate  map[string]*routerv1.RateLimit
 }
 
 func newFakeServer() *fakeServer {
@@ -48,6 +50,8 @@ func newFakeServer() *fakeServer {
 		services:   make(map[string]*routerv1.GetLoadBalancerResponse),
 		createGeos: make(map[string][]string),
 		updateGeos: make(map[string][]string),
+		createRate: make(map[string]*routerv1.RateLimit),
+		updateRate: make(map[string]*routerv1.RateLimit),
 	}
 }
 
@@ -56,6 +60,7 @@ func (f *fakeServer) CreateLoadBalancer(_ context.Context, req *routerv1.CreateL
 	defer f.mu.Unlock()
 	f.createCalls = append(f.createCalls, req.ServiceKey)
 	f.createGeos[req.ServiceKey] = append([]string(nil), req.AllowedGeos...)
+	f.createRate[req.ServiceKey] = req.RateLimit
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -64,6 +69,7 @@ func (f *fakeServer) CreateLoadBalancer(_ context.Context, req *routerv1.CreateL
 		AssignedIp:    "192.168.1.100",
 		Ports:         req.Ports,
 		AllowedGeos:   req.AllowedGeos,
+		RateLimit:     req.RateLimit,
 		DhcpAcquired:  false,
 		InterfaceName: "lb-" + req.ServiceKey,
 	}
@@ -75,12 +81,14 @@ func (f *fakeServer) UpdateLoadBalancer(_ context.Context, req *routerv1.UpdateL
 	defer f.mu.Unlock()
 	f.updateCalls = append(f.updateCalls, req.ServiceKey)
 	f.updateGeos[req.ServiceKey] = append([]string(nil), req.AllowedGeos...)
+	f.updateRate[req.ServiceKey] = req.RateLimit
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
 	if svc, ok := f.services[req.ServiceKey]; ok {
 		svc.Ports = req.Ports
 		svc.AllowedGeos = req.AllowedGeos
+		svc.RateLimit = req.RateLimit
 	}
 	return &routerv1.UpdateLoadBalancerResponse{}, nil
 }
@@ -253,9 +261,15 @@ func TestClient_Create(t *testing.T) {
 		ports := []PortMapping{
 			{Protocol: "tcp", ExternalPort: 80, Destinations: []Destination{{Addr: "10.42.0.10", Port: 8080}}},
 		}
-		entry, err := client.Create(context.Background(), "default/myapp", ports, []string{"US", "CA"})
+		entry, err := client.Create(context.Background(), "default/myapp", ports, []string{"US", "CA"}, &RateLimit{Rate: 5, Burst: 10})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if entry.RateLimit == nil || entry.RateLimit.Rate != 5 || entry.RateLimit.Burst != 10 {
+			t.Errorf("entry rate limit = %+v", entry.RateLimit)
+		}
+		if got := fake.createRate["default/myapp"]; got == nil || got.Rate != 5 || got.Burst != 10 {
+			t.Errorf("request rate limit = %+v", got)
 		}
 		if entry.AssignedIP != "192.168.1.100" {
 			t.Errorf("expected IP 192.168.1.100, got %q", entry.AssignedIP)
@@ -275,7 +289,7 @@ func TestClient_Create(t *testing.T) {
 		fake.createErr = fmt.Errorf("router down")
 		defer func() { fake.createErr = nil }()
 
-		_, err := client.Create(context.Background(), "default/fail", nil, nil)
+		_, err := client.Create(context.Background(), "default/fail", nil, nil, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -303,12 +317,15 @@ func TestClient_Update(t *testing.T) {
 		ports := []PortMapping{
 			{Protocol: "tcp", ExternalPort: 443, Destinations: []Destination{{Addr: "10.42.0.10", Port: 8443}, {Addr: "10.42.0.11", Port: 8443}}},
 		}
-		err := client.Update(context.Background(), "default/myapp", ports, []string{"EU"})
+		err := client.Update(context.Background(), "default/myapp", ports, []string{"EU"}, &RateLimit{Rate: 7, Burst: 9})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if got := fake.updateGeos["default/myapp"]; len(got) != 1 || got[0] != "EU" {
 			t.Errorf("update geos = %v", got)
+		}
+		if got := fake.updateRate["default/myapp"]; got == nil || got.Rate != 7 || got.Burst != 9 {
+			t.Errorf("update rate limit = %+v", got)
 		}
 		if len(fake.updateCalls) != 1 || fake.updateCalls[0] != "default/myapp" {
 			t.Errorf("expected update call")
@@ -319,7 +336,7 @@ func TestClient_Update(t *testing.T) {
 		fake.updateErr = fmt.Errorf("router down")
 		defer func() { fake.updateErr = nil }()
 
-		err := client.Update(context.Background(), "default/fail", nil, nil)
+		err := client.Update(context.Background(), "default/fail", nil, nil, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -377,11 +394,15 @@ func TestClient_Get(t *testing.T) {
 		DhcpAcquired:  true,
 		InterfaceName: "lb-default-myapp",
 		AllowedGeos:   []string{"US"},
+		RateLimit:     &routerv1.RateLimit{Rate: 5, Burst: 10},
 	}
 	t.Run("gets existing service", func(t *testing.T) {
 		entry, err := client.Get(context.Background(), "default/myapp")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if entry.RateLimit == nil || entry.RateLimit.Rate != 5 || entry.RateLimit.Burst != 10 {
+			t.Errorf("rate limit mismatch: %+v", entry.RateLimit)
 		}
 		if entry.AssignedIP != "81.23.45.67" {
 			t.Errorf("expected IP 81.23.45.67, got %q", entry.AssignedIP)
@@ -538,6 +559,7 @@ func TestFromProto(t *testing.T) {
 		AssignedIp:    "1.2.3.4",
 		DhcpAcquired:  true,
 		InterfaceName: "lb-ns-svc",
+		RateLimit:     &routerv1.RateLimit{Rate: 3, Burst: 4},
 		Ports: []*routerv1.PortMapping{
 			{Protocol: "tcp", SrcPort: 443, Dst: []*routerv1.Destination{
 				{Addr: "10.0.0.1", Port: 8443},
@@ -557,6 +579,9 @@ func TestFromProto(t *testing.T) {
 	}
 	if entry.Interface != "lb-ns-svc" {
 		t.Errorf("expected lb-ns-svc, got %q", entry.Interface)
+	}
+	if entry.RateLimit == nil || entry.RateLimit.Rate != 3 || entry.RateLimit.Burst != 4 {
+		t.Errorf("expected rate limit 3/4, got %+v", entry.RateLimit)
 	}
 	if len(entry.Ports) != 1 {
 		t.Fatalf("expected 1 port, got %d", len(entry.Ports))

@@ -50,6 +50,7 @@ at allocated LB IPs, and inspects nftables and log files for assertions.
 | `oidc_reject_test.go`            | 1     | 1          | mutated token (aud=bogus) rejected; controller log shows Unauthenticated; no Service status IP set               |
 | `grpc_list_test.go`              | 1     | 1          | `Get` and `List` report the same converged IP; no entry ever contains `"<nil>"`                                  |
 | `geo_block_test.go`              | 1–2   | 1          | geo deny precedes DNAT; US allowed/EU dropped; annotation flip; DB hot-reload; per-service sets                  |
+| `rate_limit_test.go`             | 1–2   | 1          | per-client new-conn limit; bucket refill; live rate change rotates the set; removal; client isolation            |
 
 Traffic is always generated **inside the `ns-server` VEPA peer namespace**
 (`collectIDs` → `CollectBackendIDsFromNS`), never from the test process's
@@ -71,7 +72,14 @@ stops/truncates/starts the in-netns dnsmasq so a kept VM starts with a clean
 Traffic also uses fresh TCP connections (curl is invoked per request, and
 `CollectBackendIDsFreshConn` sets `DisableKeepAlives`): keep-alive reuses the
 same connection — and thus the same numgen evaluation — across requests,
-which under-counts distinct backends on round-robin rules. Scenarios wait for backend pods to be Ready
+which under-counts distinct backends on round-robin rules.
+
+Rate-limit specs need many *simultaneous* new connections. `AttemptParallelFromNS`
+runs N curl processes in the background inside one `ip netns exec`, so every
+request is a distinct TCP connection from the VEPA peer. Assertions use ranges
+(`1..burst+2` successes for a flood) rather than exact counts: the token bucket
+refills while the processes start, and kernel versions differ by one on whether
+the first packet of a new element consumes a token. Scenarios wait for backend pods to be Ready
 via `WaitForBackendReady` before creating Services so a missing backend
 image fails fast with the pod's waiting reason instead of a 60s status-IP
 timeout.
@@ -109,6 +117,7 @@ e2e/
 ├── suite_helpers_test.go                     small helpers shared across scenarios
 ├── zero_lb_test.go, one_lb_test.go, ...      scenario files (all in package e2e_test)
 ├── geo_block_test.go                         country allow-list, annotation flip, hot reload, isolation
+├── rate_limit_test.go                        per-client new-connection limit, refill, update, removal, isolation
 ├── cmd/
 │   └── oidc-mock/main.go                     mock OIDC provider (RS256, embedded PEM)
 └── harness/                                  helpers imported by scenarios
@@ -177,10 +186,10 @@ that `go test`'s cache cannot see, so a cached "pass" is meaningless.
 ### Spec timing
 
 The suite has a 40-minute timeout (`-timeout=40m`). Per-spec contexts sum to
-~35 minutes worst-case (backend readiness + status IP + traffic windows
-across 11 specs), so a fully green run finishes in minutes while a cascading
-failure still produces a Ginkgo report instead of a `go test` SIGKILL. All
-specs should complete in under 10 minutes on a healthy provision.
+well under that (backend readiness + status IP + traffic windows), so a fully
+green run finishes in minutes while a cascading failure still produces a
+Ginkgo report instead of a `go test` SIGKILL. All specs should complete in
+under 15 minutes on a healthy provision.
 
 ## RPC consistency the suite pins
 

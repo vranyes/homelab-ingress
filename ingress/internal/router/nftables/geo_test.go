@@ -22,6 +22,7 @@ type fakeSetStore struct {
 	elements map[string][]nftables.SetElement
 	added    []string
 	flushed  []string
+	deleted  []string
 }
 
 func newFakeSetStore() *fakeSetStore {
@@ -52,6 +53,12 @@ func (f *fakeSetStore) FlushSet(s *nftables.Set) { f.flushed = append(f.flushed,
 func (f *fakeSetStore) SetAddElements(s *nftables.Set, elements []nftables.SetElement) error {
 	f.elements[s.Name] = append([]nftables.SetElement(nil), elements...)
 	return nil
+}
+
+func (f *fakeSetStore) DelSet(s *nftables.Set) {
+	delete(f.sets, s.Name)
+	delete(f.elements, s.Name)
+	f.deleted = append(f.deleted, s.Name)
 }
 
 func TestValidateService_GeoCodes(t *testing.T) {
