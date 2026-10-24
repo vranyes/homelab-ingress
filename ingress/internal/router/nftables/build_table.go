@@ -316,25 +316,70 @@ func geoRanges(cidrs []*net.IPNet) []ipRange {
 	return merged
 }
 
+// geoRangeElements converts one merged range into interval-set elements.
+//
+// nftables interval sets use an *exclusive* end: a single address k is
+// [k, k+1) and an inclusive range [first,last] is [first,last+1). Encoding a
+// point as a bare key works for one element but fails with EEXIST as soon as
+// several points share a message, and encoding a range as [first,last) drops
+// the last address. Both elements of a range must travel in the same netlink
+// message.
+func geoRangeElements(r ipRange) []nftables.SetElement {
+	first := binary.BigEndian.AppendUint32(nil, r.first)
+	if r.last == ^uint32(0) {
+		// No exclusive end exists past the address space. A bare start for a
+		// single address is accepted (and, being the last range, is open
+		// upward, i.e. exactly that one address). For a wider range, stop at
+		// the top address (the only excluded address).
+		if r.first == r.last {
+			return []nftables.SetElement{{Key: first}}
+		}
+		return []nftables.SetElement{
+			{Key: first},
+			{Key: binary.BigEndian.AppendUint32(nil, r.last), IntervalEnd: true},
+		}
+	}
+	return []nftables.SetElement{
+		{Key: first},
+		{
+			Key:         binary.BigEndian.AppendUint32(nil, r.last+1),
+			IntervalEnd: true,
+		},
+	}
+}
+
 // geoSetElements converts CIDRs into nftables interval-set elements.
 func geoSetElements(cidrs []*net.IPNet) []nftables.SetElement {
 	ranges := geoRanges(cidrs)
 	elements := make([]nftables.SetElement, 0, len(ranges)*2)
 	for _, r := range ranges {
-		first := binary.BigEndian.AppendUint32(nil, r.first)
-		if r.first == r.last {
-			elements = append(elements, nftables.SetElement{Key: first})
-			continue
-		}
-		elements = append(elements,
-			nftables.SetElement{Key: first},
-			nftables.SetElement{
-				Key:         binary.BigEndian.AppendUint32(nil, r.last),
-				IntervalEnd: true,
-			},
-		)
+		elements = append(elements, geoRangeElements(r)...)
 	}
 	return elements
+}
+
+// geoSetChunks splits the range elements into messages of at most max
+// elements without ever splitting a range: an interval start and its
+// IntervalEnd must travel together, otherwise the kernel treats the start as
+// a point and rejects the orphan end with EEXIST ("file exists").
+func geoSetChunks(cidrs []*net.IPNet, max int) [][]nftables.SetElement {
+	if max < 2 {
+		max = 2
+	}
+	var chunks [][]nftables.SetElement
+	var current []nftables.SetElement
+	for _, r := range geoRanges(cidrs) {
+		els := geoRangeElements(r)
+		if len(current) > 0 && len(current)+len(els) > max {
+			chunks = append(chunks, current)
+			current = nil
+		}
+		current = append(current, els...)
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
 }
 
 // geoSetChunkSize bounds the number of set elements per netlink message.
@@ -348,7 +393,7 @@ const geoSetChunkSize = 2000
 // geo_<safeName(serviceKey)>.
 func buildGeoUnionSet(ss setStore, table *nftables.Table, sn string, cidrs []*net.IPNet) (*nftables.Set, error) {
 	name := geoSetName(sn)
-	elements := geoSetElements(cidrs)
+	chunks := geoSetChunks(cidrs, geoSetChunkSize)
 
 	existing, err := ss.GetSets(table)
 	if err != nil {
@@ -364,7 +409,7 @@ func buildGeoUnionSet(ss setStore, table *nftables.Table, sn string, cidrs []*ne
 		if err := ss.Flush(); err != nil {
 			return nil, fmt.Errorf("flush set %s: %w", name, err)
 		}
-		return s, addSetElementsChunked(ss, s, elements)
+		return s, addSetElementChunks(ss, s, chunks)
 	}
 
 	set := &nftables.Set{
@@ -381,28 +426,48 @@ func buildGeoUnionSet(ss setStore, table *nftables.Table, sn string, cidrs []*ne
 	if err := ss.Flush(); err != nil {
 		return nil, fmt.Errorf("create set %s: %w", name, err)
 	}
-	if err := addSetElementsChunked(ss, set, elements); err != nil {
+	if err := addSetElementChunks(ss, set, chunks); err != nil {
 		return nil, err
 	}
 	return set, nil
 }
 
-// addSetElementsChunked adds elements in geoSetChunkSize batches, flushing
-// each batch. It is a no-op for an empty set.
-func addSetElementsChunked(ss setStore, set *nftables.Set, elements []nftables.SetElement) error {
-	for start := 0; start < len(elements); start += geoSetChunkSize {
-		end := start + geoSetChunkSize
-		if end > len(elements) {
-			end = len(elements)
-		}
-		if err := ss.SetAddElements(set, elements[start:end]); err != nil {
-			return fmt.Errorf("SetAddElements(%s) [%d:%d]: %w", set.Name, start, end, err)
+// addSetElementChunks adds pre-grouped elements, flushing after each group.
+func addSetElementChunks(ss setStore, set *nftables.Set, chunks [][]nftables.SetElement) error {
+	for i, chunk := range chunks {
+		if err := ss.SetAddElements(set, chunk); err != nil {
+			return fmt.Errorf("SetAddElements(%s) chunk %d: %w", set.Name, i, err)
 		}
 		if err := ss.Flush(); err != nil {
-			return fmt.Errorf("flush set %s [%d:%d]: %w", set.Name, start, end, err)
+			return fmt.Errorf("flush set %s chunk %d: %w", set.Name, i, err)
 		}
 	}
 	return nil
+}
+
+// chunkElements splits a flat element list into fixed-size batches. It must
+// only be used for non-interval sets; interval ranges have to be grouped with
+// geoSetChunks so a start and its IntervalEnd stay together.
+func chunkElements(elements []nftables.SetElement, max int) [][]nftables.SetElement {
+	if max < 1 {
+		max = 1
+	}
+	var chunks [][]nftables.SetElement
+	for start := 0; start < len(elements); start += max {
+		end := start + max
+		if end > len(elements) {
+			end = len(elements)
+		}
+		chunks = append(chunks, elements[start:end])
+	}
+	return chunks
+}
+
+// addSetElementsChunked adds flat elements in geoSetChunkSize batches. It is
+// safe only for non-interval sets (see chunkElements); the geo path uses
+// geoSetChunks.
+func addSetElementsChunked(ss setStore, set *nftables.Set, elements []nftables.SetElement) error {
+	return addSetElementChunks(ss, set, chunkElements(elements, geoSetChunkSize))
 }
 
 // buildGeoSetDenyExprs returns:

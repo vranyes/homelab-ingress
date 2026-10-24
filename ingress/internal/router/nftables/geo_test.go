@@ -109,6 +109,58 @@ func TestGeoSetName(t *testing.T) {
 	}
 }
 
+func TestGeoSetChunksKeepRangesWhole(t *testing.T) {
+	cidrs := make([]*net.IPNet, 0, 12)
+	// Non-adjacent points plus multi-element ranges, so a naive element
+	// slicer would split pairs at several boundaries.
+	for i := 0; i < 8; i++ {
+		v := uint32(10)<<24 | uint32(i*2)
+		ip := net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+		cidrs = append(cidrs, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)})
+	}
+	cidrs = append(cidrs,
+		mustCIDR(t, "10.1.0.0/24"),
+		mustCIDR(t, "10.2.0.0/16"),
+		mustCIDR(t, "10.4.0.0/20"),
+	)
+
+	const max = 3
+	chunks := geoSetChunks(cidrs, max)
+	want := geoSetElements(cidrs)
+
+	var flat []nftables.SetElement
+	chunkOf := make([]int, 0, len(want))
+	for ci, chunk := range chunks {
+		if len(chunk) > max {
+			t.Fatalf("chunk %d has %d elements, max %d", ci, len(chunk), max)
+		}
+		flat = append(flat, chunk...)
+		for range chunk {
+			chunkOf = append(chunkOf, ci)
+		}
+	}
+	if len(flat) != len(want) {
+		t.Fatalf("chunks flattened to %d elements, want %d", len(flat), len(want))
+	}
+	for i := range flat {
+		if string(flat[i].Key) != string(want[i].Key) || flat[i].IntervalEnd != want[i].IntervalEnd {
+			t.Fatalf("element %d = %+v, want %+v", i, flat[i], want[i])
+		}
+	}
+	for i, el := range want {
+		if !el.IntervalEnd {
+			continue
+		}
+		if i == 0 {
+			t.Fatalf("interval end at index 0 has no start")
+		}
+		if chunkOf[i] != chunkOf[i-1] {
+			t.Fatalf("interval end at index %d is in chunk %d, its start in chunk %d",
+				i, chunkOf[i], chunkOf[i-1])
+		}
+	}
+}
+
 func TestAddSetElementsChunked(t *testing.T) {
 	ss := newFakeSetStore()
 	set := &nftables.Set{Name: "chunked"}
@@ -129,6 +181,60 @@ func TestAddSetElementsChunked(t *testing.T) {
 	}
 	if got := len(ss.elements[set.Name]); got != total {
 		t.Fatalf("elements = %d, want %d", got, total)
+	}
+}
+
+// TestBuildGeoUnionSet_IntervalChunksKeepRangesWhole is the regression test
+// for the EEXIST ("file exists") failure seen with large real geo sets after
+// chunking was introduced: a flat element slice can split an interval range's
+// start from its IntervalEnd, and the kernel rejects the orphan end.
+//
+// The synthetic set has 1,999 disjoint /32 ranges followed by one /24 range.
+// A flat 2,000-element chunk boundary lands exactly between the /24 start and
+// its IntervalEnd. It needs a writable netlink socket; unprivileged runs skip.
+func TestBuildGeoUnionSet_IntervalChunksKeepRangesWhole(t *testing.T) {
+	c, err := nftables.New()
+	if err != nil {
+		t.Skipf("nftables unavailable: %v", err)
+	}
+
+	table := &nftables.Table{Name: "hl_test_geo_chunks", Family: nftables.TableFamilyIPv4}
+	if tables, err := c.ListTables(); err == nil {
+		for _, old := range tables {
+			if old.Name == table.Name {
+				c.DelTable(old)
+			}
+		}
+	}
+	c.AddTable(table)
+	if err := c.Flush(); err != nil {
+		t.Skipf("nftables not writable: %v", err)
+	}
+	defer func() {
+		c.DelTable(table)
+		_ = c.Flush()
+	}()
+
+	// 1,999 non-adjacent /32s (step 2 so geoRanges does not merge them),
+	// then a /24 whose start+end straddle the flat 2,000-element boundary.
+	cidrs := make([]*net.IPNet, 0, 2000)
+	for i := 0; i < 1999; i++ {
+		v := uint32(10)<<24 | uint32(i*2)
+		ip := net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+		cidrs = append(cidrs, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)})
+	}
+	cidrs = append(cidrs, mustCIDR(t, "10.1.0.0/24"))
+
+	set, err := buildGeoUnionSet(c, table, "testgeo", cidrs)
+	if err != nil {
+		t.Fatalf("buildGeoUnionSet: %v", err)
+	}
+	got, err := c.GetSetElements(set)
+	if err != nil {
+		t.Fatalf("GetSetElements: %v", err)
+	}
+	if len(got) != 1999*2+2 {
+		t.Fatalf("set elements = %d, want %d", len(got), 1999*2+2)
 	}
 }
 
@@ -195,20 +301,26 @@ func TestGeoSetElements(t *testing.T) {
 	}
 	got := geoSetElements(cidrs)
 
-	if len(got) != 3 {
-		t.Fatalf("elements = %d, want 3: %+v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("elements = %d, want 4: %+v", len(got), got)
 	}
 	assertKey(t, got[0].Key, 0x0a000000) // 10.0.0.0
 	if got[0].IntervalEnd {
 		t.Fatal("range start must not be an interval end")
 	}
-	assertKey(t, got[1].Key, 0x0a0001ff) // 10.0.1.255
+	// Interval ends are exclusive: [10.0.0.0, 10.0.1.255] ends at 10.0.2.0.
+	assertKey(t, got[1].Key, 0x0a000200)
 	if !got[1].IntervalEnd {
 		t.Fatal("range end must be an interval end")
 	}
 	assertKey(t, got[2].Key, 0xc0000201) // 192.0.2.1
 	if got[2].IntervalEnd {
-		t.Fatal("/32 must be a point element")
+		t.Fatal("point start must not be an interval end")
+	}
+	// A point 192.0.2.1 is [192.0.2.1, 192.0.2.2).
+	assertKey(t, got[3].Key, 0xc0000202)
+	if !got[3].IntervalEnd {
+		t.Fatal("point end must be an interval end")
 	}
 }
 

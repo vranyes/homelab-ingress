@@ -143,8 +143,12 @@ place, so a database refresh needs neither a restart nor a chain rebuild.
 Country unions are large (US+CA is tens of thousands of ranges), and a single
 netlink message carrying the whole set exceeds the socket limit with
 `sendmsg: message too long` (EMSGSIZE). Set population is therefore split into
-2,000-element chunks, each flushed separately (`geoSetChunkSize`); the chunked
-upload is covered by a real-kernel unit test.
+2,000-element chunks, each flushed separately (`geoSetChunkSize`); chunks are
+cut on range boundaries (`geoSetChunks`) so an interval start and its
+`IntervalEnd` always travel in the same message. nftables interval ends are
+exclusive: a single address `k` is `[k, k+1)` and a range `[first,last]` is
+`[first,last+1)`. The encoding and chunking are covered by real-kernel unit
+tests, including a range that straddles the chunk boundary.
 
 With a non-empty allow-list, the per-LB chain starts with:
 
