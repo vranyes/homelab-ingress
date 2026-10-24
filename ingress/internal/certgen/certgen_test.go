@@ -3,6 +3,7 @@ package certgen
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -72,6 +73,40 @@ func TestLoadOrCreate_MissingKeyDoesNotClobberValidCert(t *testing.T) {
 
 	if certAfter, _ := os.ReadFile(caCertPath(dir)); !bytes.Equal(certBefore, certAfter) {
 		t.Fatalf("BUG: ca.pem was overwritten even though the call failed; valid cert was clobbered")
+	}
+}
+
+// TestLoadOrCreate_RefusesNewCAWhenStateDBExists pins the guard against silent
+// rotation after a partial restore: an initialised state directory whose CA
+// material is gone must fail loudly, not mint a new trust anchor.
+func TestLoadOrCreate_RefusesNewCAWhenStateDBExists(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, stateDBFile), []byte("db"), 0644); err != nil {
+		t.Fatalf("seed state.db: %v", err)
+	}
+
+	_, _, err := LoadOrCreate(dir, []string{"127.0.0.1"})
+	if err == nil {
+		t.Fatal("expected an error when state.db exists without CA material")
+	}
+	if fileExists(caCertPath(dir)) || fileExists(caKeyPath(dir)) {
+		t.Fatal("CA material was written despite the refusal")
+	}
+}
+
+// TestLoadOrCreate_GeneratesForFreshDir keeps the legitimate first-boot path:
+// no state.db, no CA files.
+func TestLoadOrCreate_GeneratesForFreshDir(t *testing.T) {
+	dir := t.TempDir()
+	_, caPEM, err := LoadOrCreate(dir, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	if len(caPEM) == 0 {
+		t.Fatal("expected a CA PEM")
+	}
+	if !fileExists(caCertPath(dir)) || !fileExists(caKeyPath(dir)) {
+		t.Fatal("CA material was not persisted")
 	}
 }
 

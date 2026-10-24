@@ -63,3 +63,16 @@ Rate limiting
   formatting differences do not churn the router.
 - Only new connections count; established traffic is unaffected. The bucket is
   per Service and per source IP, shared across all of its ports.
+
+CA and TLS
+- The controller verifies the ingress with the CA mounted at
+  `/etc/homelab-ingress/ca.pem` (ConfigMap `homelab-ingress-ca`).
+- The ingress reuses its CA across restarts; only the leaf certificate is
+  regenerated. If you deliberately rotate the CA, refresh the ConfigMap and
+  restart the controller:
+
+  ```sh
+  kubectl -n default create configmap homelab-ingress-ca \
+    --from-file=ca.pem=/path/to/ca.pem --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n default rollout restart deployment/homelab-ingress-controller
+  ```

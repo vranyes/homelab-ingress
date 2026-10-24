@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -50,6 +52,30 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.GeoIP.ApplyDefaults(*stateDir)
+
+	// Load or create the root CA before touching state. On a first boot the
+	// state directory is empty, so a CA is generated; on every later boot the
+	// existing CA is reused. The fingerprint is logged so operators can prove
+	// whether a restart rotated it.
+	serverNames := []string{stripPort(cfg.GRPC.Listen)}
+	tlsCert, caPEM, err := certgen.LoadOrCreate(*stateDir, serverNames)
+	if err != nil {
+		logger.Error("failed to load or create TLS certificate", "error", err)
+		os.Exit(1)
+	}
+	caOut := filepath.Join(*stateDir, "ca.pem")
+	if _, statErr := os.Stat(caOut); os.IsNotExist(statErr) {
+		if err := os.WriteFile(caOut, caPEM, 0644); err != nil {
+			logger.Error("failed to write CA certificate", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("CA certificate written", "path", caOut)
+	}
+	caSum := sha256.Sum256(caPEM)
+	logger.Info("CA certificate ready",
+		"path", caOut,
+		"state_dir", *stateDir,
+		"sha256", hex.EncodeToString(caSum[:]))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -115,24 +141,6 @@ func main() {
 	srv := service.NewRouterServer(st, logger)
 	srv.ActiveMacvlanFunc = linkMgr.ActiveCount
 	srv.GeoEnabled = cfg.GeoIP.Enabled()
-
-	// Load or create a root CA and generate a leaf TLS certificate for the server.
-	serverNames := []string{stripPort(cfg.GRPC.Listen)}
-	tlsCert, caPEM, err := certgen.LoadOrCreate(*stateDir, serverNames)
-	if err != nil {
-		logger.Error("failed to load or create TLS certificate", "error", err)
-		os.Exit(1)
-	}
-
-	// Write the CA PEM so clients can pick it up.
-	caOut := filepath.Join(*stateDir, "ca.pem")
-	if _, err := os.Stat(caOut); os.IsNotExist(err) {
-		if err := os.WriteFile(caOut, caPEM, 0644); err != nil {
-			logger.Error("failed to write CA certificate", "error", err)
-			os.Exit(1)
-		}
-		logger.Info("CA certificate written", "path", caOut)
-	}
 
 	// Always use TLS for the gRPC server.
 	tlsCfg := &tls.Config{

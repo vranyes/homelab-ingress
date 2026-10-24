@@ -19,10 +19,21 @@ import (
 const (
 	caCertFile = "ca.pem"
 	caKeyFile  = "ca-key.pem"
+	// stateDBFile is the ingress state database. It is used only as a
+	// "this state directory has been initialised before" sentinel: if it is
+	// present while both CA files are gone, the CA was lost rather than never
+	// created, and silently generating a new one would break every client
+	// pinning ca.pem (notably the controller's ConfigMap).
+	stateDBFile = "state.db"
 )
 
-func caCertPath(dir string) string  { return filepath.Join(dir, caCertFile) }
-func caKeyPath(dir string) string   { return filepath.Join(dir, caKeyFile) }
+func caCertPath(dir string) string { return filepath.Join(dir, caCertFile) }
+func caKeyPath(dir string) string  { return filepath.Join(dir, caKeyFile) }
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 func loadOrCreateCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	certPEM, certErr := os.ReadFile(caCertPath(dir))
@@ -36,7 +47,16 @@ func loadOrCreateCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 		return parseCA(certPEM, keyPEM)
 
 	case os.IsNotExist(certErr) && os.IsNotExist(keyErr):
-		// First boot: neither file exists yet. Generate and persist.
+		// Neither CA file exists. Only generate when the state directory has
+		// never been initialised; otherwise the CA was lost (ephemeral state
+		// dir, partial restore, mistaken cleanup) and a new one would rotate
+		// the trust anchor out from under the controller.
+		if fileExists(filepath.Join(dir, stateDBFile)) {
+			return nil, nil, fmt.Errorf(
+				"state.db exists in %q but ca.pem and ca-key.pem are missing; "+
+					"refusing to generate a new CA (restore both files, or move the state directory "+
+					"aside for a deliberate full reset)", dir)
+		}
 		return generateAndPersistCA(dir)
 
 	default:

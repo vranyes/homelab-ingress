@@ -38,6 +38,39 @@ The split is deliberate:
   rewriting it in flash on every refresh is pure wear. The cost is one download
   per boot. Set `geoip_cache_path` to persist it instead — see below.
 
+### CA persistence
+
+The daemon reuses `ca.pem`/`ca-key.pem` when both exist; only the **leaf**
+certificate is minted afresh on every start. The CA is the trust anchor the
+controller pins via its `homelab-ingress-ca` ConfigMap, so it must not change
+underneath it.
+
+Every start logs the CA fingerprint:
+
+```text
+level=INFO msg="CA certificate ready" path=/etc/homelab-ingress/ca.pem state_dir=/etc/homelab-ingress sha256=<hex>
+```
+
+Compare that value across restarts. If it changes, the state directory is not
+persisting — a tmpfs or container-backed `state_dir`, or a sysupgrade that
+dropped it. `state_dir` must live on persistent storage. On OpenWrt, add it to
+the sysupgrade backup list:
+
+```sh
+echo '/etc/homelab-ingress' >> /etc/sysupgrade.conf
+```
+
+If `state.db` exists but both CA files are missing, the daemon refuses to start
+instead of silently generating a new CA. Restore the two files, or move the
+whole state directory aside for a deliberate reset. After restoring or rotating
+the CA, refresh the controller ConfigMap and restart the controller:
+
+```sh
+kubectl -n default create configmap homelab-ingress-ca \
+  --from-file=ca.pem=/path/to/ca.pem --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n default rollout restart deployment/homelab-ingress-controller
+```
+
 ## Option reference
 
 | UCI option                | YAML key                  | Default                | Notes                                                       |
