@@ -1,0 +1,48 @@
+groups:
+  - name: homelab-ingress
+    interval: 1m
+    rules:
+      - alert: HomelabIngressBackendDown
+        expr: homelab_ingress_backend_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.addr }}:{{ $labels.port }} for {{ $labels.service }} is down"
+          description: "Active TCP probes have failed past the flap threshold. The backend is excluded from DNAT maps until it recovers."
+
+      - alert: HomelabIngressNftApplyErrors
+        expr: sum by (op) (increase(homelab_ingress_nft_apply_errors_total[10m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "nftables apply failures (op={{ $labels.op }})"
+          description: "Check daemon logs for netlink/validation errors; rules may be stale."
+
+      - alert: HomelabIngressReconcileErrors
+        expr: sum by (manager) (increase(homelab_ingress_reconcile_total{result="error"}[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reconcile errors in {{ $labels.manager }}"
+          description: "A manager is failing to converge; check daemon logs."
+
+      - alert: HomelabIngressDHCPLeaseExpiring
+        expr: (homelab_ingress_dhcp_lease_expiry_seconds - time()) < 3600 and homelab_ingress_dhcp_lease_expiry_seconds > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DHCP lease for {{ $labels.service }} expires within an hour"
+          description: "Renewal may be failing; check DHCP manager logs and the upstream server."
+
+      - alert: HomelabIngressGeoDBStale
+        expr: homelab_ingress_geo_db_age_seconds > 8 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Geo country database is stale"
+          description: "MaxMind refreshes daily / DB-IP monthly. Check geoip manager logs and cache path writability."
