@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 
@@ -34,6 +35,15 @@ func validateService(svc state.LBService) error {
 	for _, cc := range svc.AllowedGeos {
 		if !isoAlpha2RE.MatchString(cc) {
 			return fmt.Errorf("invalid ISO-3166 alpha-2 code %q", cc)
+		}
+	}
+	for _, raw := range svc.AllowedCIDRs {
+		_, ipNet, err := net.ParseCIDR(raw)
+		if err != nil {
+			return fmt.Errorf("invalid CIDR %q: must be in address/prefix form", raw)
+		}
+		if ipNet.IP.To4() == nil {
+			return fmt.Errorf("invalid CIDR %q: only IPv4 is supported", raw)
 		}
 	}
 	if svc.RateLimit != nil {

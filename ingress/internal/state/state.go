@@ -38,6 +38,7 @@ type LBService struct {
 	SourceMask    net.IPMask       `json:"source_mask,omitempty"`
 	Targets       []LBTarget       `json:"targets"`
 	AllowedGeos   []string         `json:"allowed_geos,omitempty"`
+	AllowedCIDRs  []string         `json:"allowed_cidrs,omitempty"`
 	RateLimit     *RateLimit       `json:"rate_limit,omitempty"`
 }
 
@@ -80,6 +81,10 @@ func (s *LBService) Clone() *LBService {
 	if s.AllowedGeos != nil {
 		cpy.AllowedGeos = make([]string, len(s.AllowedGeos))
 		copy(cpy.AllowedGeos, s.AllowedGeos)
+	}
+	if s.AllowedCIDRs != nil {
+		cpy.AllowedCIDRs = make([]string, len(s.AllowedCIDRs))
+		copy(cpy.AllowedCIDRs, s.AllowedCIDRs)
 	}
 	if s.RateLimit != nil {
 		rl := *s.RateLimit

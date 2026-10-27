@@ -112,6 +112,56 @@ func TestServiceCIDRs_ConcatenatesPerCountry(t *testing.T) {
 	}
 }
 
+func TestServiceCIDRs_UnionsStaticCIDRs(t *testing.T) {
+	src := newFakeSource()
+	src.set("US", "10.44.0.0/26")
+	st := testState(t, map[string][]string{
+		"ns/both": {"US"},
+		"ns/cidr": nil,
+		"ns/open": nil,
+	})
+	// Static CIDRs bypass the country database entirely.
+	mustSvc := func(key string, cidrs ...string) {
+		t.Helper()
+		svc, ok := st.GetService(key)
+		if !ok {
+			t.Fatalf("service %s missing", key)
+		}
+		svc.AllowedCIDRs = cidrs
+		st.UpdateService(svc)
+	}
+	mustSvc("ns/both", "192.168.1.0/24")
+	mustSvc("ns/cidr", "10.0.0.0/8")
+	m := NewManager(src, st, discardLogger(), "unused")
+
+	got := m.ServiceCIDRs()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 services with CIDRs, got %v", keysOf(got))
+	}
+	if len(got["ns/both"]) != 2 {
+		t.Fatalf("ns/both union = %v, want 1 country CIDR + 1 static CIDR", got["ns/both"])
+	}
+	if len(got["ns/cidr"]) != 1 || got["ns/cidr"][0].String() != "10.0.0.0/8" {
+		t.Fatalf("ns/cidr union = %v", got["ns/cidr"])
+	}
+
+	// Invalid static CIDRs are skipped (the RPC layer rejects them; this is
+	// defence in depth for state written by older/newer binaries).
+	mustSvc("ns/cidr", "bogus", "10.1.0.0/16")
+	got = m.ServiceCIDRs()
+	if len(got["ns/cidr"]) != 1 || got["ns/cidr"][0].String() != "10.1.0.0/16" {
+		t.Fatalf("ns/cidr union with invalid entry = %v", got["ns/cidr"])
+	}
+}
+
+func keysOf(m map[string][]*net.IPNet) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func TestSnapshotInUse(t *testing.T) {
 	st := testState(t, map[string][]string{
 		"ns/a": {"US", "CA"},

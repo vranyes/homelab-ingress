@@ -56,6 +56,11 @@ func (s *RouterServer) CreateLoadBalancer(ctx context.Context, req *routerv1.Cre
 		return nil, err
 	}
 
+	cidrs, err := cidrsFromRequest(req.AllowedCidrs)
+	if err != nil {
+		return nil, err
+	}
+
 	rateLimit, err := rateLimitFromProto(req.RateLimit)
 	if err != nil {
 		return nil, err
@@ -63,10 +68,11 @@ func (s *RouterServer) CreateLoadBalancer(ctx context.Context, req *routerv1.Cre
 
 	ports := protoPortsToState(req.Ports)
 	svc := &state.LBService{
-		ServiceName: req.ServiceKey,
-		Targets:     ports,
-		AllowedGeos: geos,
-		RateLimit:   rateLimit,
+		ServiceName:  req.ServiceKey,
+		Targets:      ports,
+		AllowedGeos:  geos,
+		AllowedCIDRs: cidrs,
+		RateLimit:    rateLimit,
 	}
 	s.stateData.UpdateService(svc)
 
@@ -93,6 +99,11 @@ func (s *RouterServer) UpdateLoadBalancer(ctx context.Context, req *routerv1.Upd
 		return nil, err
 	}
 
+	cidrs, err := cidrsFromRequest(req.AllowedCidrs)
+	if err != nil {
+		return nil, err
+	}
+
 	rateLimit, err := rateLimitFromProto(req.RateLimit)
 	if err != nil {
 		return nil, err
@@ -103,6 +114,7 @@ func (s *RouterServer) UpdateLoadBalancer(ctx context.Context, req *routerv1.Upd
 	updated := svc.Clone()
 	updated.Targets = protoPortsToState(req.Ports)
 	updated.AllowedGeos = geos
+	updated.AllowedCIDRs = cidrs
 	updated.RateLimit = rateLimit
 	s.stateData.UpdateService(updated)
 
@@ -140,10 +152,11 @@ func (s *RouterServer) GetLoadBalancer(ctx context.Context, req *routerv1.GetLoa
 
 	s.logger.Debug("load balancer found", "service_key", req.ServiceKey)
 	resp := &routerv1.GetLoadBalancerResponse{
-		ServiceKey:  req.ServiceKey,
-		Ports:       statePortsToProto(svc.Targets),
-		AllowedGeos: svc.AllowedGeos,
-		RateLimit:   stateRateLimitToProto(svc.RateLimit),
+		ServiceKey:   req.ServiceKey,
+		Ports:        statePortsToProto(svc.Targets),
+		AllowedGeos:  svc.AllowedGeos,
+		AllowedCidrs: svc.AllowedCIDRs,
+		RateLimit:    stateRateLimitToProto(svc.RateLimit),
 	}
 	if svc.SourceAddress != nil {
 		resp.AssignedIp = svc.SourceAddress.String()
@@ -166,10 +179,11 @@ func (s *RouterServer) ListLoadBalancers(ctx context.Context, req *routerv1.List
 	var lbs []*routerv1.GetLoadBalancerResponse
 	for key, svc := range snap.Services {
 		resp := &routerv1.GetLoadBalancerResponse{
-			ServiceKey:  key,
-			Ports:       statePortsToProto(svc.Targets),
-			AllowedGeos: svc.AllowedGeos,
-			RateLimit:   stateRateLimitToProto(svc.RateLimit),
+			ServiceKey:   key,
+			Ports:        statePortsToProto(svc.Targets),
+			AllowedGeos:  svc.AllowedGeos,
+			AllowedCidrs: svc.AllowedCIDRs,
+			RateLimit:    stateRateLimitToProto(svc.RateLimit),
 		}
 		// Mirror GetLoadBalancer: a DHCP-pending service has no source
 		// address yet. net.IP(nil).String() returns "<nil>", which the
@@ -234,7 +248,9 @@ func stateRateLimitToProto(rl *state.RateLimit) *routerv1.RateLimit {
 }
 
 // geosFromRequest normalises and validates the requested country codes.
-// Requests carrying geos are rejected while MaxMind is not configured.
+// Requests carrying geos are rejected while MaxMind is not configured. An
+// empty list is always accepted (backward compatible allow-all); note that
+// static CIDRs (cidrsFromRequest) never require the geo database.
 func (s *RouterServer) geosFromRequest(in []string) ([]string, error) {
 	if len(in) == 0 {
 		return nil, nil
@@ -256,6 +272,43 @@ func (s *RouterServer) geosFromRequest(in []string) ([]string, error) {
 		}
 		seen[cc] = struct{}{}
 		out = append(out, cc)
+	}
+	return out, nil
+}
+
+// cidrsFromRequest normalises and validates the requested static CIDR
+// allow-list. Entries are canonicalised via IPNet.String() and de-duplicated.
+// Empty/whitespace entries are skipped (e.g. from a trailing comma), matching
+// the controller and geos handling. Unlike geos, static CIDRs need no country
+// database, so they are accepted regardless of GeoEnabled. IPv6 is rejected:
+// the nftables table is IPv4-only.
+func cidrsFromRequest(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, raw := range in {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(trimmed)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid CIDR %q: must be in address/prefix form", raw)
+		}
+		if ipNet.IP.To4() == nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid CIDR %q: only IPv4 is supported", raw)
+		}
+		canonical := ipNet.String()
+		if _, dup := seen[canonical]; dup {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
+	}
+	if len(out) == 0 {
+		return nil, nil
 	}
 	return out, nil
 }

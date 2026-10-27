@@ -51,6 +51,8 @@ type stubRouter struct {
 	deleteCalls         []string
 	lastCreateGeos      []string
 	lastUpdateGeos      []string
+	lastCreateCIDRs     []string
+	lastUpdateCIDRs     []string
 	lastCreateRateLimit *router.RateLimit
 	lastUpdateRateLimit *router.RateLimit
 	updateErr           error
@@ -60,18 +62,20 @@ func newStubRouter(ip string) *stubRouter {
 	return &stubRouter{entries: map[string]*router.ServiceEntry{}, cannedIP: ip}
 }
 
-func (s *stubRouter) Create(_ context.Context, key string, ports []router.PortMapping, geos []string, rateLimit *router.RateLimit) (*router.ServiceEntry, error) {
+func (s *stubRouter) Create(_ context.Context, key string, ports []router.PortMapping, geos []string, cidrs []string, rateLimit *router.RateLimit) (*router.ServiceEntry, error) {
 	s.createCalls = append(s.createCalls, key)
 	s.lastCreateGeos = append([]string(nil), geos...)
+	s.lastCreateCIDRs = append([]string(nil), cidrs...)
 	s.lastCreateRateLimit = rateLimit
-	e := &router.ServiceEntry{ServiceKey: key, AssignedIP: s.cannedIP, Ports: ports, AllowedGeos: geos, RateLimit: rateLimit}
+	e := &router.ServiceEntry{ServiceKey: key, AssignedIP: s.cannedIP, Ports: ports, AllowedGeos: geos, AllowedCIDRs: cidrs, RateLimit: rateLimit}
 	s.entries[key] = e
 	return e, nil
 }
 
-func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMapping, geos []string, rateLimit *router.RateLimit) error {
+func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMapping, geos []string, cidrs []string, rateLimit *router.RateLimit) error {
 	s.updateCalls = append(s.updateCalls, key)
 	s.lastUpdateGeos = append([]string(nil), geos...)
+	s.lastUpdateCIDRs = append([]string(nil), cidrs...)
 	s.lastUpdateRateLimit = rateLimit
 	if s.updateErr != nil {
 		return s.updateErr
@@ -79,6 +83,7 @@ func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMa
 	if e, ok := s.entries[key]; ok {
 		e.Ports = ports
 		e.AllowedGeos = geos
+		e.AllowedCIDRs = cidrs
 		e.RateLimit = rateLimit
 	}
 	return nil
@@ -437,6 +442,54 @@ func TestAllowedGeosAnnotation(t *testing.T) {
 	}
 }
 
+func TestAllowedCIDRs(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    []string
+		wantErr bool
+	}{
+		{"missing", "", nil, false},
+		{"single", "192.168.1.0/24", []string{"192.168.1.0/24"}, false},
+		{"trims canonicalizes and dedupes", " 192.168.1.1/24 ,10.0.0.0/8,192.168.1.0/24 ", []string{"192.168.1.0/24", "10.0.0.0/8"}, false},
+		{"overlapping kept", "10.0.0.0/8,10.1.0.0/16", []string{"10.0.0.0/8", "10.1.0.0/16"}, false},
+		{"invalid rejected", "192.168.1.0/24,not-a-cidr", nil, true},
+		{"ipv6 rejected", "fd00::/64", nil, true},
+		{"mixed v4 and v6 rejected", "10.0.0.0/8,fd00::/64", nil, true},
+		{"empty entries ignored", "10.0.0.0/8,,", []string{"10.0.0.0/8"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &corev1.Service{}
+			if tc.raw != "" {
+				svc.Annotations = map[string]string{AnnotationAllowedCIDRs: tc.raw}
+			}
+			got, err := AllowedCIDRs(svc)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("AllowedCIDRs(%q) = %v, want error", tc.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("AllowedCIDRs(%q) error = %v", tc.raw, err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("AllowedCIDRs(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("AllowedCIDRs(%q) = %v, want %v", tc.raw, got, tc.want)
+				}
+			}
+		})
+	}
+
+	if got, err := AllowedCIDRs(nil); err != nil || got != nil {
+		t.Fatalf("nil service = %v, %v", got, err)
+	}
+}
+
 func TestGeosChanged(t *testing.T) {
 	if geosChanged(nil, nil) {
 		t.Fatal("nil vs nil must be unchanged")
@@ -509,4 +562,155 @@ func TestReconcile_ForwardsGeos(t *testing.T) {
 	if len(rt.updateCalls) != 1 {
 		t.Fatalf("no-op annotation triggered another update: %v", rt.updateCalls)
 	}
+}
+
+func TestCidrsChanged(t *testing.T) {
+	if cidrsChanged(nil, nil) {
+		t.Fatal("nil vs nil must be unchanged")
+	}
+	if cidrsChanged([]string{"10.0.0.0/8"}, []string{"10.0.0.0/8"}) {
+		t.Fatal("identical must be unchanged")
+	}
+	if cidrsChanged([]string{"10.0.0.0/8", "192.168.1.0/24"}, []string{"192.168.1.0/24", "10.0.0.0/8"}) {
+		t.Fatal("order-only difference must be unchanged")
+	}
+	if !cidrsChanged([]string{"192.168.1.0/24"}, []string{"192.168.1.0/24", "10.0.0.0/8"}) {
+		t.Fatal("added CIDR must be a change")
+	}
+	if !cidrsChanged([]string{"10.0.0.0/8"}, nil) {
+		t.Fatal("non-empty to nil must be a change")
+	}
+	if !cidrsChanged(nil, []string{"10.0.0.0/8"}) {
+		t.Fatal("nil to non-empty must be a change")
+	}
+}
+
+func TestReconcile_ForwardsCIDRs(t *testing.T) {
+	rt := newStubRouter("10.44.0.50")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+		lbService("ns", "web", func(s *corev1.Service) {
+			s.Annotations = map[string]string{AnnotationAllowedCIDRs: "192.168.1.1/24, 10.0.0.0/8"}
+		}),
+		endpointSlice("ns", "web-a", "web", "http", 8080, true, "10.0.0.1"),
+	).WithStatusSubresource(&corev1.Service{}).Build()
+	r := &ServiceReconciler{Client: cl, RouterClient: rt}
+
+	reconcile := func() {
+		t.Helper()
+		if _, err := r.Reconcile(testCtx(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "ns", Name: "web"},
+		}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+
+	reconcile()
+	if len(rt.createCalls) != 1 {
+		t.Fatalf("create calls = %v", rt.createCalls)
+	}
+	if len(rt.lastCreateCIDRs) != 2 || rt.lastCreateCIDRs[0] != "192.168.1.0/24" || rt.lastCreateCIDRs[1] != "10.0.0.0/8" {
+		t.Fatalf("create cidrs = %v", rt.lastCreateCIDRs)
+	}
+
+	// Changing only the annotation must trigger an update carrying the new set.
+	svc := getSvc(t, cl)
+	svc.Annotations[AnnotationAllowedCIDRs] = "10.0.0.0/8"
+	if err := cl.Update(testCtx(), svc); err != nil {
+		t.Fatalf("update annotation: %v", err)
+	}
+	reconcile()
+	if len(rt.updateCalls) != 1 {
+		t.Fatalf("update calls = %v", rt.updateCalls)
+	}
+	if len(rt.lastUpdateCIDRs) != 1 || rt.lastUpdateCIDRs[0] != "10.0.0.0/8" {
+		t.Fatalf("update cidrs = %v", rt.lastUpdateCIDRs)
+	}
+}
+
+func TestReconcile_InvalidCIDRsFailsClosed(t *testing.T) {
+	t.Run("create with invalid proceeds with nil and still patches status", func(t *testing.T) {
+		rt := newStubRouter("10.44.0.50")
+		cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+			lbService("ns", "web", func(s *corev1.Service) {
+				s.Annotations = map[string]string{AnnotationAllowedCIDRs: "not-a-cidr"}
+			}),
+			endpointSlice("ns", "web-a", "web", "http", 8080, true, "10.0.0.1"),
+		).WithStatusSubresource(&corev1.Service{}).Build()
+		r := &ServiceReconciler{Client: cl, RouterClient: rt}
+
+		if _, err := r.Reconcile(testCtx(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "ns", Name: "web"},
+		}); err != nil {
+			t.Fatalf("reconcile with invalid CIDRs must not fail: %v", err)
+		}
+		if len(rt.createCalls) != 1 {
+			t.Fatalf("expected one create with invalid CIDRs, got %+v", rt.createCalls)
+		}
+		if len(rt.lastCreateCIDRs) != 0 {
+			t.Fatalf("create with invalid CIDRs must use nil: %v", rt.lastCreateCIDRs)
+		}
+		got := getSvc(t, cl)
+		if len(got.Status.LoadBalancer.Ingress) != 1 || got.Status.LoadBalancer.Ingress[0].IP != "10.44.0.50" {
+			t.Fatalf("status IP not patched: %+v", got.Status.LoadBalancer.Ingress)
+		}
+	})
+
+	t.Run("update with invalid keeps previous and still reconciles geos", func(t *testing.T) {
+		rt := newStubRouter("10.44.0.50")
+		cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+			lbService("ns", "web", func(s *corev1.Service) {
+				s.Annotations = map[string]string{AnnotationAllowedCIDRs: "192.168.1.0/24"}
+			}),
+			endpointSlice("ns", "web-a", "web", "http", 8080, true, "10.0.0.1"),
+		).WithStatusSubresource(&corev1.Service{}).Build()
+		r := &ServiceReconciler{Client: cl, RouterClient: rt}
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "web"}}
+
+		if _, err := r.Reconcile(testCtx(), req); err != nil {
+			t.Fatalf("initial reconcile: %v", err)
+		}
+		if len(rt.createCalls) != 1 {
+			t.Fatalf("create calls = %v", rt.createCalls)
+		}
+
+		// Flip to an invalid value: no error, no router churn, entry keeps
+		// the last-good CIDRs.
+		svc := getSvc(t, cl)
+		svc.Annotations[AnnotationAllowedCIDRs] = "bogus"
+		if err := cl.Update(testCtx(), svc); err != nil {
+			t.Fatalf("update annotation: %v", err)
+		}
+		if _, err := r.Reconcile(testCtx(), req); err != nil {
+			t.Fatalf("reconcile with invalid CIDRs must not fail: %v", err)
+		}
+		if len(rt.updateCalls) != 0 {
+			t.Fatalf("invalid CIDRs changed the router: %v", rt.updateCalls)
+		}
+		entry, err := rt.Get(testCtx(), "ns/web")
+		if err != nil {
+			t.Fatalf("get router entry: %v", err)
+		}
+		if len(entry.AllowedCIDRs) != 1 || entry.AllowedCIDRs[0] != "192.168.1.0/24" {
+			t.Fatalf("previous CIDRs were not preserved: %+v", entry.AllowedCIDRs)
+		}
+
+		// Other fields still reconcile while CIDRs stay preserved.
+		svc = getSvc(t, cl)
+		svc.Annotations[AnnotationAllowedGeos] = "US"
+		if err := cl.Update(testCtx(), svc); err != nil {
+			t.Fatalf("update geos annotation: %v", err)
+		}
+		if _, err := r.Reconcile(testCtx(), req); err != nil {
+			t.Fatalf("reconcile geos with invalid CIDRs: %v", err)
+		}
+		if len(rt.updateCalls) != 1 {
+			t.Fatalf("geos change did not update the router: %v", rt.updateCalls)
+		}
+		if len(rt.lastUpdateCIDRs) != 1 || rt.lastUpdateCIDRs[0] != "192.168.1.0/24" {
+			t.Fatalf("update did not preserve CIDRs: %v", rt.lastUpdateCIDRs)
+		}
+		if len(rt.lastUpdateGeos) != 1 || rt.lastUpdateGeos[0] != "US" {
+			t.Fatalf("update geos = %v", rt.lastUpdateGeos)
+		}
+	})
 }

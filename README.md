@@ -36,6 +36,27 @@ geoip:
   provider: dbip            # free, no key; or "maxmind" with a license_key
 ```
 
+### LAN bypass (`allowed-cidrs`)
+
+Private IPs have no country in the geo database, so a geo-blocked Service
+locks out LAN clients too. Add IPv4 CIDRs that are always allowed alongside
+the country list:
+
+```yaml
+metadata:
+  annotations:
+    homelab-ingress.vranyes.com/allowed-geos: "US,CA"
+    homelab-ingress.vranyes.com/allowed-cidrs: "192.168.1.0/24, 10.0.0.0/8"
+```
+
+Either annotation (or both) switches the Service to deny-by-default with a
+union set: a packet is accepted when its source is in any allowed country
+**or** any listed CIDR. Any IPv4 CIDR works (RFC 1918, CGNAT `100.64.0.0/10`,
+link-local, ...); IPv6 is rejected because the nftables table is IPv4-only.
+Static CIDRs need no geo database, so a CIDR-only Service works with
+`geoip.provider` unset. An invalid CIDR keeps the last-good CIDRs (none on
+first install) and still reconciles — it never silently opens the Service.
+
 See [docs/GEOBLOCKING_PLAN.md](docs/GEOBLOCKING_PLAN.md) and
 [ADR 0006](docs/adr/0006-dbip-lite-provider.md).
 

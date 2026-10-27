@@ -31,7 +31,8 @@ ws:
 # homelab-ingress.vranyes.com/allowed-geos annotation (e.g. "US,CA").
 # Providers: "dbip" (free, no key; data by DB-IP, https://db-ip.com, CC BY 4.0),
 # "maxmind" (GeoLite2; requires a license key), or "mock" (e2e fixture).
-# Without this block, Services must not set allowed-geos.
+# Without this block, Services must not set allowed-geos (the static
+# homelab-ingress.vranyes.com/allowed-cidrs allow-list works without it).
 # geoip:
 #   provider: dbip
 #   refresh_interval: 24h

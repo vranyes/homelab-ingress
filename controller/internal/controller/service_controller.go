@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -170,6 +171,20 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 	}
 
 	geos := AllowedGeos(svc)
+	// A fully-invalid geos annotation normalises to nil (allow all). Surface
+	// it so a typo doesn't silently open the service.
+	if rawGeos, ok := svc.Annotations[AnnotationAllowedGeos]; ok && strings.TrimSpace(rawGeos) != "" && len(geos) == 0 {
+		logger.Info("invalid allowed-geos annotation, allowing all traffic",
+			"service", serviceKey, "annotation", rawGeos)
+	}
+	cidrs, cidrErr := AllowedCIDRs(svc)
+	if cidrErr != nil {
+		// Like the rate-limit annotation: log and keep the last known good
+		// CIDRs instead of failing the reconcile (which would hot-loop).
+		// Data plane keeps serving; status still patches.
+		logger.Info("invalid allowed-cidrs annotation, keeping previous CIDRs",
+			"service", serviceKey, "error", cidrErr)
+	}
 	desiredRateLimit, rateLimitErr := RateLimitFromAnnotations(svc)
 	if rateLimitErr != nil {
 		// A malformed annotation must not silently disable protection. Keep
@@ -193,10 +208,14 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 
 	if existing == nil {
 		// Nothing to preserve on create; an invalid annotation simply means
-		// the first install has no limit.
+		// the first install has no limit / no CIDRs.
+		createCIDRs := cidrs
+		if cidrErr != nil {
+			createCIDRs = nil
+		}
 		createRateLimit := toRouterRateLimit(desiredRateLimit)
 		logger.Info("creating load balancer on router", "service", serviceKey)
-		entry, err := r.RouterClient.Create(ctx, serviceKey, ports, geos, createRateLimit)
+		entry, err := r.RouterClient.Create(ctx, serviceKey, ports, geos, createCIDRs, createRateLimit)
 		if err != nil {
 			if router.IsRetryable(err) {
 				logger.Info("router temporarily unavailable during create, requeueing", "service", serviceKey, "error", err)
@@ -221,6 +240,11 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 		return ctrl.Result{RequeueAfter: targetConvergenceDelay}, nil
 	}
 
+	if cidrErr != nil {
+		// Preserve the last known good CIDRs while still reconciling ports
+		// and geo rules.
+		cidrs = existing.AllowedCIDRs
+	}
 	if rateLimitErr != nil {
 		// Preserve the last known good value while still reconciling ports
 		// and geo rules.
@@ -229,9 +253,10 @@ func (r *ServiceReconciler) reconcileUpsert(ctx context.Context, svc *corev1.Ser
 
 	if portsChanged(existing.Ports, ports) ||
 		geosChanged(existing.AllowedGeos, geos) ||
+		cidrsChanged(existing.AllowedCIDRs, cidrs) ||
 		rateLimitChanged(fromRouterRateLimit(existing.RateLimit), desiredRateLimit) {
 		logger.Info("updating load balancer on router", "service", serviceKey)
-		if err := r.RouterClient.Update(ctx, serviceKey, ports, geos, toRouterRateLimit(desiredRateLimit)); err != nil {
+		if err := r.RouterClient.Update(ctx, serviceKey, ports, geos, cidrs, toRouterRateLimit(desiredRateLimit)); err != nil {
 			if router.IsRetryable(err) {
 				logger.Info("router temporarily unavailable during update, requeueing", "service", serviceKey, "error", err)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -421,8 +446,6 @@ func portsChanged(existing, desired []router.PortMapping) bool {
 	return false
 }
 
-// geosChanged compares allow-lists as sets so annotation ordering does not
-// churn the router.
 func toRouterRateLimit(rl *RateLimit) *router.RateLimit {
 	if rl == nil {
 		return nil
@@ -437,6 +460,26 @@ func fromRouterRateLimit(rl *router.RateLimit) *RateLimit {
 	return &RateLimit{Rate: rl.Rate, Burst: rl.Burst}
 }
 
+// cidrsChanged compares allow-lists as sets so annotation ordering does not
+// churn the router. Both sides are canonical (IPNet.String()) forms.
+func cidrsChanged(existing, desired []string) bool {
+	if len(existing) != len(desired) {
+		return true
+	}
+	have := make(map[string]struct{}, len(existing))
+	for _, c := range existing {
+		have[c] = struct{}{}
+	}
+	for _, c := range desired {
+		if _, ok := have[c]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// geosChanged compares allow-lists as sets so annotation ordering does not
+// churn the router.
 func geosChanged(existing, desired []string) bool {
 	if len(existing) != len(desired) {
 		return true

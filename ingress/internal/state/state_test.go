@@ -240,3 +240,22 @@ func TestCloneCopiesAllowedGeos(t *testing.T) {
 		t.Fatalf("nil allowed geos became %v", got.AllowedGeos)
 	}
 }
+
+func TestCloneCopiesAllowedCIDRs(t *testing.T) {
+	svc := svcWithAddr("ns/svc", "10.44.0.50")
+	svc.AllowedCIDRs = []string{"192.168.1.0/24", "10.0.0.0/8"}
+
+	clone := svc.Clone()
+	if len(clone.AllowedCIDRs) != 2 || clone.AllowedCIDRs[0] != "192.168.1.0/24" || clone.AllowedCIDRs[1] != "10.0.0.0/8" {
+		t.Fatalf("clone allowed cidrs = %v", clone.AllowedCIDRs)
+	}
+
+	clone.AllowedCIDRs[0] = "172.16.0.0/12"
+	if svc.AllowedCIDRs[0] != "192.168.1.0/24" {
+		t.Fatalf("clone shares backing array with original: %v", svc.AllowedCIDRs)
+	}
+
+	if got := (&LBService{ServiceName: "x"}).Clone(); got.AllowedCIDRs != nil {
+		t.Fatalf("nil allowed cidrs became %v", got.AllowedCIDRs)
+	}
+}

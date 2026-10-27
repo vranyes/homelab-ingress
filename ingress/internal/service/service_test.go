@@ -394,3 +394,207 @@ func TestInvalidGeoCodeRejected(t *testing.T) {
 		t.Fatalf("error = %v, want InvalidArgument", err)
 	}
 }
+
+// -- allowed-cidrs tests --
+
+func TestCreateLoadBalancer_StoresCIDRs(t *testing.T) {
+	srv, st := newGeoTestServer(t, true)
+	_, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/svc",
+		Ports:      validPorts(),
+		// Host bits are canonicalised; duplicates dropped.
+		AllowedCidrs: []string{" 192.168.1.1/24 ", "10.0.0.0/8", "192.168.1.0/24"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, ok := st.GetService("ns/svc")
+	if !ok {
+		t.Fatal("service not stored")
+	}
+	if len(svc.AllowedCIDRs) != 2 || svc.AllowedCIDRs[0] != "192.168.1.0/24" || svc.AllowedCIDRs[1] != "10.0.0.0/8" {
+		t.Fatalf("stored cidrs = %v", svc.AllowedCIDRs)
+	}
+}
+
+func TestCIDRsAllowedWithoutGeoDB(t *testing.T) {
+	// Static CIDRs need no country database (ADR: CIDRs allowed even without
+	// GeoEnabled; only geos gate on the DB).
+	srv, st := newGeoTestServer(t, false)
+	_, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedCidrs: []string{"192.168.1.0/24"},
+	})
+	if err != nil {
+		t.Fatalf("create with only CIDRs and no geo DB: %v", err)
+	}
+	svc, _ := st.GetService("ns/svc")
+	if len(svc.AllowedCIDRs) != 1 || svc.AllowedCIDRs[0] != "192.168.1.0/24" {
+		t.Fatalf("stored cidrs = %v", svc.AllowedCIDRs)
+	}
+}
+
+func TestInvalidCIDRRejected(t *testing.T) {
+	srv, st := newGeoTestServer(t, true)
+	for _, cidrs := range [][]string{{"not-a-cidr"}, {"fd00::/64"}, {"192.168.1.0/24", "bogus"}} {
+		_, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+			ServiceKey: "ns/svc", Ports: validPorts(), AllowedCidrs: cidrs,
+		})
+		if codeOf(err) != codes.InvalidArgument {
+			t.Fatalf("cidrs %v: error = %v, want InvalidArgument", cidrs, err)
+		}
+		if st.HasService("ns/svc") {
+			t.Fatalf("cidrs %v: state was mutated on a rejected create", cidrs)
+		}
+	}
+}
+
+func TestUpdateLoadBalancer_ReplacesCIDRs(t *testing.T) {
+	srv, st := newGeoTestServer(t, true)
+	if _, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedCidrs: []string{"192.168.1.0/24"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := srv.UpdateLoadBalancer(context.Background(), &routerv1.UpdateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedCidrs: []string{"10.0.0.0/8"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := st.GetService("ns/svc")
+	if len(svc.AllowedCIDRs) != 1 || svc.AllowedCIDRs[0] != "10.0.0.0/8" {
+		t.Fatalf("updated cidrs = %v", svc.AllowedCIDRs)
+	}
+
+	// Empty list clears the static allow-list.
+	if _, err := srv.UpdateLoadBalancer(context.Background(), &routerv1.UpdateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ = st.GetService("ns/svc")
+	if len(svc.AllowedCIDRs) != 0 {
+		t.Fatalf("cidrs not cleared: %v", svc.AllowedCIDRs)
+	}
+
+	// A rejected update leaves the stored CIDRs untouched.
+	if _, err := srv.UpdateLoadBalancer(context.Background(), &routerv1.UpdateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(), AllowedCidrs: []string{"bogus"},
+	}); codeOf(err) != codes.InvalidArgument {
+		t.Fatalf("error = %v, want InvalidArgument", err)
+	}
+	svc, _ = st.GetService("ns/svc")
+	if len(svc.AllowedCIDRs) != 0 {
+		t.Fatalf("state was mutated on a rejected update: %v", svc.AllowedCIDRs)
+	}
+}
+
+func TestGetAndList_ReturnCIDRs(t *testing.T) {
+	srv, _ := newGeoTestServer(t, true)
+	if _, err := srv.CreateLoadBalancer(context.Background(), &routerv1.CreateLoadBalancerRequest{
+		ServiceKey: "ns/svc", Ports: validPorts(),
+		AllowedGeos: []string{"US"}, AllowedCidrs: []string{"192.168.1.0/24"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := srv.GetLoadBalancer(context.Background(), &routerv1.GetLoadBalancerRequest{ServiceKey: "ns/svc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.AllowedCidrs) != 1 || got.AllowedCidrs[0] != "192.168.1.0/24" {
+		t.Fatalf("Get cidrs = %v", got.AllowedCidrs)
+	}
+
+	list, err := srv.ListLoadBalancers(context.Background(), &routerv1.ListLoadBalancersRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.LoadBalancers) != 1 || len(list.LoadBalancers[0].AllowedCidrs) != 1 {
+		t.Fatalf("List cidrs = %v", list.LoadBalancers)
+	}
+}
+
+func TestCIDRPrefixEdges(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("slash32 accepted", func(t *testing.T) {
+		srv, st := newGeoTestServer(t, true)
+		if _, err := srv.CreateLoadBalancer(ctx, &routerv1.CreateLoadBalancerRequest{
+			ServiceKey: "ns/svc", Ports: validPorts(), AllowedCidrs: []string{"192.168.1.1/32"},
+		}); err != nil {
+			t.Fatalf("create /32: %v", err)
+		}
+		svc, _ := st.GetService("ns/svc")
+		if len(svc.AllowedCIDRs) != 1 || svc.AllowedCIDRs[0] != "192.168.1.1/32" {
+			t.Fatalf("stored cidrs = %v", svc.AllowedCIDRs)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		cidrs []string
+	}{
+		{"slash33 rejected", []string{"192.168.1.0/33"}},
+		{"bare IP rejected", []string{"192.168.1.1"}},
+		{"bare IP among valid rejected", []string{"10.0.0.0/8", "192.168.1.1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st := newGeoTestServer(t, true)
+			_, err := srv.CreateLoadBalancer(ctx, &routerv1.CreateLoadBalancerRequest{
+				ServiceKey: "ns/svc", Ports: validPorts(), AllowedCidrs: tc.cidrs,
+			})
+			if codeOf(err) != codes.InvalidArgument {
+				t.Fatalf("cidrs %v: error = %v, want InvalidArgument", tc.cidrs, err)
+			}
+			if st.HasService("ns/svc") {
+				t.Fatalf("cidrs %v: state was mutated on a rejected create", tc.cidrs)
+			}
+		})
+	}
+}
+
+func TestCIDRsSkipEmptyEntries(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("trailing commas and whitespace skipped", func(t *testing.T) {
+		srv, st := newGeoTestServer(t, true)
+		if _, err := srv.CreateLoadBalancer(ctx, &routerv1.CreateLoadBalancerRequest{
+			ServiceKey: "ns/svc", Ports: validPorts(),
+			AllowedCidrs: []string{"10.0.0.0/8", "", "   ", " 10.0.0.0/8 "},
+		}); err != nil {
+			t.Fatalf("create with empty entries: %v", err)
+		}
+		svc, _ := st.GetService("ns/svc")
+		if len(svc.AllowedCIDRs) != 1 || svc.AllowedCIDRs[0] != "10.0.0.0/8" {
+			t.Fatalf("stored cidrs = %v", svc.AllowedCIDRs)
+		}
+	})
+
+	t.Run("all empty means allow-all", func(t *testing.T) {
+		srv, st := newGeoTestServer(t, true)
+		if _, err := srv.CreateLoadBalancer(ctx, &routerv1.CreateLoadBalancerRequest{
+			ServiceKey: "ns/svc", Ports: validPorts(), AllowedCidrs: []string{"", "   "},
+		}); err != nil {
+			t.Fatalf("create with only empty entries: %v", err)
+		}
+		svc, _ := st.GetService("ns/svc")
+		if len(svc.AllowedCIDRs) != 0 {
+			t.Fatalf("expected nil CIDRs, got %v", svc.AllowedCIDRs)
+		}
+	})
+
+	t.Run("overlapping CIDRs kept", func(t *testing.T) {
+		srv, st := newGeoTestServer(t, true)
+		if _, err := srv.CreateLoadBalancer(ctx, &routerv1.CreateLoadBalancerRequest{
+			ServiceKey: "ns/svc", Ports: validPorts(),
+			AllowedCidrs: []string{"10.0.0.0/8", "10.1.0.0/16"},
+		}); err != nil {
+			t.Fatalf("create overlapping: %v", err)
+		}
+		svc, _ := st.GetService("ns/svc")
+		if len(svc.AllowedCIDRs) != 2 {
+			t.Fatalf("overlapping CIDRs were collapsed: %v", svc.AllowedCIDRs)
+		}
+	})
+}

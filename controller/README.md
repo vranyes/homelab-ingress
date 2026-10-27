@@ -30,9 +30,15 @@ Geo-blocking
 
 - Codes are comma-separated ISO-3166 alpha-2, normalized (trim/uppercase/
   dedupe/drop invalid) and compared as a set; edits apply in place.
-- Absent/empty means allow all. No CRD or extra RBAC needed.
+- `homelab-ingress.vranyes.com/allowed-cidrs` adds static IPv4 CIDRs
+  (e.g. `"192.168.1.0/24"`) that are always allowed alongside the country
+  list — e.g. so LAN clients are not locked out. Either annotation non-empty
+  means deny-by-default with a union set. Invalid CIDRs keep the last-good CIDRs (none on first install)
+  and still reconcile (fail closed, no hot-loop); IPv6 is rejected.
+- Absent/empty (both annotations) means allow all. No CRD or extra RBAC needed.
 - The daemon resolves countries to CIDRs. Requires `geoip.provider`;
-  otherwise a non-empty list fails and sets no status IP.
+  otherwise a non-empty geos list fails and sets no status IP (a CIDR-only
+  allow-list works without it).
 
 Rate limiting
 - Cap new connections per source IP with two annotations:

@@ -193,8 +193,9 @@ type CreateLoadBalancerRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ServiceKey    string                 `protobuf:"bytes,1,opt,name=service_key,json=serviceKey,proto3" json:"service_key,omitempty"`
 	Ports         []*PortMapping         `protobuf:"bytes,2,rep,name=ports,proto3" json:"ports,omitempty"`
-	AllowedGeos   []string               `protobuf:"bytes,3,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"` // ISO-3166 alpha-2 country codes
-	RateLimit     *RateLimit             `protobuf:"bytes,4,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`       // absent disables rate limiting
+	AllowedGeos   []string               `protobuf:"bytes,3,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"`    // ISO-3166 alpha-2 country codes
+	RateLimit     *RateLimit             `protobuf:"bytes,4,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`          // absent disables rate limiting
+	AllowedCidrs  []string               `protobuf:"bytes,5,rep,name=allowed_cidrs,json=allowedCidrs,proto3" json:"allowed_cidrs,omitempty"` // IPv4 CIDRs always allowed (e.g. LAN ranges)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -257,6 +258,13 @@ func (x *CreateLoadBalancerRequest) GetRateLimit() *RateLimit {
 	return nil
 }
 
+func (x *CreateLoadBalancerRequest) GetAllowedCidrs() []string {
+	if x != nil {
+		return x.AllowedCidrs
+	}
+	return nil
+}
+
 type CreateLoadBalancerResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AssignedIp    string                 `protobuf:"bytes,1,opt,name=assigned_ip,json=assignedIp,proto3" json:"assigned_ip,omitempty"`
@@ -305,8 +313,9 @@ type UpdateLoadBalancerRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ServiceKey    string                 `protobuf:"bytes,1,opt,name=service_key,json=serviceKey,proto3" json:"service_key,omitempty"`
 	Ports         []*PortMapping         `protobuf:"bytes,2,rep,name=ports,proto3" json:"ports,omitempty"`
-	AllowedGeos   []string               `protobuf:"bytes,3,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"` // ISO-3166 alpha-2 country codes
-	RateLimit     *RateLimit             `protobuf:"bytes,4,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`       // absent clears the rate limit
+	AllowedGeos   []string               `protobuf:"bytes,3,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"`    // ISO-3166 alpha-2 country codes
+	RateLimit     *RateLimit             `protobuf:"bytes,4,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`          // absent clears the rate limit
+	AllowedCidrs  []string               `protobuf:"bytes,5,rep,name=allowed_cidrs,json=allowedCidrs,proto3" json:"allowed_cidrs,omitempty"` // IPv4 CIDRs always allowed (e.g. LAN ranges)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -365,6 +374,13 @@ func (x *UpdateLoadBalancerRequest) GetAllowedGeos() []string {
 func (x *UpdateLoadBalancerRequest) GetRateLimit() *RateLimit {
 	if x != nil {
 		return x.RateLimit
+	}
+	return nil
+}
+
+func (x *UpdateLoadBalancerRequest) GetAllowedCidrs() []string {
+	if x != nil {
+		return x.AllowedCidrs
 	}
 	return nil
 }
@@ -536,8 +552,9 @@ type GetLoadBalancerResponse struct {
 	Ports         []*PortMapping         `protobuf:"bytes,3,rep,name=ports,proto3" json:"ports,omitempty"`
 	DhcpAcquired  bool                   `protobuf:"varint,4,opt,name=dhcp_acquired,json=dhcpAcquired,proto3" json:"dhcp_acquired,omitempty"`
 	InterfaceName string                 `protobuf:"bytes,5,opt,name=interface_name,json=interfaceName,proto3" json:"interface_name,omitempty"`
-	AllowedGeos   []string               `protobuf:"bytes,6,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"` // ISO-3166 alpha-2 country codes
-	RateLimit     *RateLimit             `protobuf:"bytes,7,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`       // absent means rate limiting is disabled
+	AllowedGeos   []string               `protobuf:"bytes,6,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"`    // ISO-3166 alpha-2 country codes
+	RateLimit     *RateLimit             `protobuf:"bytes,7,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`          // absent means rate limiting is disabled
+	AllowedCidrs  []string               `protobuf:"bytes,8,rep,name=allowed_cidrs,json=allowedCidrs,proto3" json:"allowed_cidrs,omitempty"` // IPv4 CIDRs always allowed (e.g. LAN ranges)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -617,6 +634,13 @@ func (x *GetLoadBalancerResponse) GetAllowedGeos() []string {
 func (x *GetLoadBalancerResponse) GetRateLimit() *RateLimit {
 	if x != nil {
 		return x.RateLimit
+	}
+	return nil
+}
+
+func (x *GetLoadBalancerResponse) GetAllowedCidrs() []string {
+	if x != nil {
+		return x.AllowedCidrs
 	}
 	return nil
 }
@@ -811,24 +835,26 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x04addr\x18\x02 \x01(\tR\x04addr\"5\n" +
 	"\tRateLimit\x12\x12\n" +
 	"\x04rate\x18\x01 \x01(\x04R\x04rate\x12\x14\n" +
-	"\x05burst\x18\x02 \x01(\rR\x05burst\"\xc2\x01\n" +
+	"\x05burst\x18\x02 \x01(\rR\x05burst\"\xe7\x01\n" +
 	"\x19CreateLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12,\n" +
 	"\x05ports\x18\x02 \x03(\v2\x16.router.v1.PortMappingR\x05ports\x12!\n" +
 	"\fallowed_geos\x18\x03 \x03(\tR\vallowedGeos\x123\n" +
 	"\n" +
-	"rate_limit\x18\x04 \x01(\v2\x14.router.v1.RateLimitR\trateLimit\"=\n" +
+	"rate_limit\x18\x04 \x01(\v2\x14.router.v1.RateLimitR\trateLimit\x12#\n" +
+	"\rallowed_cidrs\x18\x05 \x03(\tR\fallowedCidrs\"=\n" +
 	"\x1aCreateLoadBalancerResponse\x12\x1f\n" +
 	"\vassigned_ip\x18\x01 \x01(\tR\n" +
-	"assignedIp\"\xc2\x01\n" +
+	"assignedIp\"\xe7\x01\n" +
 	"\x19UpdateLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12,\n" +
 	"\x05ports\x18\x02 \x03(\v2\x16.router.v1.PortMappingR\x05ports\x12!\n" +
 	"\fallowed_geos\x18\x03 \x03(\tR\vallowedGeos\x123\n" +
 	"\n" +
-	"rate_limit\x18\x04 \x01(\v2\x14.router.v1.RateLimitR\trateLimit\"\x1c\n" +
+	"rate_limit\x18\x04 \x01(\v2\x14.router.v1.RateLimitR\trateLimit\x12#\n" +
+	"\rallowed_cidrs\x18\x05 \x03(\tR\fallowedCidrs\"\x1c\n" +
 	"\x1aUpdateLoadBalancerResponse\"<\n" +
 	"\x19DeleteLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
@@ -836,7 +862,7 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x1aDeleteLoadBalancerResponse\"9\n" +
 	"\x16GetLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
-	"serviceKey\"\xad\x02\n" +
+	"serviceKey\"\xd2\x02\n" +
 	"\x17GetLoadBalancerResponse\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12\x1f\n" +
@@ -847,7 +873,8 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x0einterface_name\x18\x05 \x01(\tR\rinterfaceName\x12!\n" +
 	"\fallowed_geos\x18\x06 \x03(\tR\vallowedGeos\x123\n" +
 	"\n" +
-	"rate_limit\x18\a \x01(\v2\x14.router.v1.RateLimitR\trateLimit\"\x1a\n" +
+	"rate_limit\x18\a \x01(\v2\x14.router.v1.RateLimitR\trateLimit\x12#\n" +
+	"\rallowed_cidrs\x18\b \x03(\tR\fallowedCidrs\"\x1a\n" +
 	"\x18ListLoadBalancersRequest\"f\n" +
 	"\x19ListLoadBalancersResponse\x12I\n" +
 	"\x0eload_balancers\x18\x01 \x03(\v2\".router.v1.GetLoadBalancerResponseR\rloadBalancers\"\x0f\n" +

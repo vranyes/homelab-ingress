@@ -528,6 +528,105 @@ func TestPlanRules_UnknownCountryFailsClosed(t *testing.T) {
 	}
 }
 
+func TestValidateService_CIDRs(t *testing.T) {
+	tests := []struct {
+		name  string
+		cidrs []string
+		ok    bool
+	}{
+		{"nil", nil, true},
+		{"valid pair", []string{"10.0.0.0/8", "192.168.1.0/24"}, true},
+		{"host bits tolerated (masked to the network)", []string{"192.168.1.1/24"}, true},
+		{"not a cidr rejected", []string{"bogus"}, false},
+		{"bare IP rejected", []string{"10.0.0.1"}, false},
+		{"ipv6 rejected", []string{"fd00::/64"}, false},
+		{"mixed valid and invalid rejected", []string{"10.0.0.0/8", "bogus"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateService(state.LBService{
+				ServiceName:  "ns/svc",
+				Targets:      validTargets(),
+				AllowedCIDRs: tc.cidrs,
+			})
+			if tc.ok && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}
+
+func TestPlanRules_CIDRsOnlyWithoutLookup(t *testing.T) {
+	// Static CIDRs need no country database: a nil geo lookup must not fail
+	// a CIDR-only service.
+	m := &Manager{conn: newTestConn(t), logger: testLogger()}
+	ss := newFakeSetStore()
+	table := &nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv4}
+	chain := &nftables.Chain{Name: "pre_x", Table: table}
+
+	rules, err := m.planRules(m.conn, ss, table, chain, state.LBService{
+		ServiceName:   "ns/svc",
+		SourceAddress: net.ParseIP("10.44.0.50"),
+		AllowedCIDRs:  []string{"192.168.1.0/24"},
+		Targets:       validTargets(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 3 {
+		t.Fatalf("expected geo + dnat + drop, got %d rules", len(rules))
+	}
+	if !hasInvertedLookup(rules[0].Exprs) {
+		t.Fatalf("first rule is not the deny: %#v", rules[0].Exprs)
+	}
+	set := ss.sets[geoSetName(safeName("ns/svc"))]
+	if set == nil {
+		t.Fatal("geo set was not created")
+	}
+	if len(ss.elements[set.Name]) != 2 {
+		t.Fatalf("static CIDR elements = %v", ss.elements[set.Name])
+	}
+}
+
+func TestPlanRules_GeosAndCIDRsUnion(t *testing.T) {
+	m := &Manager{
+		conn:      newTestConn(t),
+		logger:    testLogger(),
+		geoLookup: staticLookup(map[string][]string{"US": {"10.44.0.0/26"}}),
+	}
+	ss := newFakeSetStore()
+	table := &nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv4}
+	chain := &nftables.Chain{Name: "pre_x", Table: table}
+
+	rules, err := m.planRules(m.conn, ss, table, chain, state.LBService{
+		ServiceName:   "ns/svc",
+		SourceAddress: net.ParseIP("10.44.0.50"),
+		AllowedGeos:   []string{"US"},
+		AllowedCIDRs:  []string{"192.168.1.0/24"},
+		Targets:       validTargets(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 3 {
+		t.Fatalf("expected geo + dnat + drop, got %d rules", len(rules))
+	}
+	if !hasInvertedLookup(rules[0].Exprs) {
+		t.Fatalf("first rule is not the deny: %#v", rules[0].Exprs)
+	}
+	// Two disjoint ranges (country + static) → start + exclusive end each.
+	set := ss.sets[geoSetName(safeName("ns/svc"))]
+	if set == nil {
+		t.Fatal("geo set was not created")
+	}
+	if len(ss.elements[set.Name]) != 4 {
+		t.Fatalf("union elements = %v", ss.elements[set.Name])
+	}
+}
+
 func TestRefreshGeoSets_FlushesAndRepopulates(t *testing.T) {
 	m := &Manager{logger: testLogger()}
 	ss := newFakeSetStore()

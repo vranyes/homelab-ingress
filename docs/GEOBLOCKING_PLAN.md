@@ -20,20 +20,21 @@ Implemented and covered by unit and e2e tests:
 ## Data flow
 
 ```text
-Service annotation
+Service annotations
   homelab-ingress.vranyes.com/allowed-geos: "US,CA"
+  homelab-ingress.vranyes.com/allowed-cidrs: "192.168.1.0/24"
             │
             ▼
-controller: AllowedGeos() → Create/Update RPC (allowed_geos)
+controller: AllowedGeos() + AllowedCIDRs() → Create/Update RPC (allowed_geos, allowed_cidrs)
             │
             ▼
-ingress gRPC: normalize + validate ISO-3166 alpha-2
+ingress gRPC: normalize + validate ISO-3166 alpha-2 codes and IPv4 CIDRs
             │
             ▼
-state.LBService.AllowedGeos (persisted in the `services` table of `state.db`)
+state.LBService.AllowedGeos + AllowedCIDRs (persisted in the `services` table of `state.db`)
             │
             ▼
-nftables AddRules: resolve countries → per-service union set geo_<sn>
+nftables AddRules: resolve countries + parse static CIDRs → per-service union set geo_<sn>
                    emit deny rule first, then DNAT, then final drop
             │
             ▼
@@ -64,15 +65,46 @@ Remove the annotation to allow all traffic:
 kubectl annotate svc web homelab-ingress.vranyes.com/allowed-geos-
 ```
 
+A Service is allow-all only when **both** annotations are absent/empty.
+
 Parser semantics (`controller/internal/controller/annotations.go`):
 
-- comma-separated codes
-- trimmed, uppercased, de-duplicated (`" us, ca,US "` → `["US","CA"]`)
-- invalid entries are dropped
-- absent, empty, or all-invalid → `nil` (allow all)
+- `allowed-geos`: comma-separated codes, trimmed, uppercased, de-duplicated
+  (`" us, ca,US "` → `["US","CA"]`); invalid entries are dropped; absent,
+  empty, or all-invalid → `nil` (allow all, unless `allowed-cidrs` is set).
+- `allowed-cidrs`: comma-separated IPv4 CIDRs, trimmed, canonicalised via
+  `IPNet.String()`, de-duplicated (`" 192.168.1.1/24 "` → `["192.168.1.0/24"]`);
+  empty entries are skipped; **any** structurally invalid entry (unparseable
+  CIDR, IPv6) returns an error and the controller logs it and keeps the
+  last-good CIDRs (`nil` on first install) while still reconciling
+  (fail closed, no hot-loop). Absent or empty → `nil`.
 
-> **Operational sharp edge:** typo'd codes (e.g. `USA`) normalize to nil, so
-> the Service becomes unrestricted. Review the annotation as security config.
+### Static CIDR bypass (`allowed-cidrs`)
+
+Private IPs (RFC 1918, CGNAT, link-local) have no country in MaxMind/DB-IP, so
+an `allowed-geos` Service drops LAN traffic. The `allowed-cidrs` annotation
+(`homelab-ingress.vranyes.com/allowed-cidrs: "192.168.1.0/24, 10.0.0.0/8"`)
+adds static IPv4 CIDRs that are always allowed alongside the country list:
+
+- Either annotation non-empty → deny-by-default with a union set (country
+  CIDRs ∪ static CIDRs). Both empty → allow all (backward compatible).
+- No magic country codes: the union is explicit in the annotation and in
+  `state.LBService` (`allowed_geos` + `allowed_cidrs` JSON fields).
+- Static CIDRs are enforced even with `geoip.provider` unset; only
+  `allowed-geos` gates on the database (ADR 0003). The nftables deny rule is
+  emitted for CIDR-only Services with no geo lookup configured.
+- Scope is IPv4 only (the nftables table ignores IPv6); IPv6 CIDRs are
+  rejected at every layer (controller annotation, gRPC validation, nftables
+  `validateService`).
+- `geo.Manager.ServiceCIDRs()` unions `CountryCIDRs` with the parsed static
+  CIDRs (invalid entries skipped with a log — defence in depth, the RPC layer
+  already rejected them). `SnapshotInUse` stays country-only (cache
+  bookkeeping).
+
+> **Operational sharp edge:** typo'd geos (e.g. `USA`) are dropped and
+> normalise to nil, so the Service fails OPEN (unrestricted). CIDR typos
+> fail CLOSED: the controller keeps the last-good CIDRs and still
+> reconciles. Review both annotations as security config.
 
 ## gRPC interface
 
@@ -84,13 +116,16 @@ message CreateLoadBalancerRequest {
   repeated PortMapping ports = 2;
   repeated string allowed_geos = 3; // ISO-3166 alpha-2
   // ... plus rate_limit (see ADR 0007), omitted here
+  repeated string allowed_cidrs = 5; // IPv4 CIDRs always allowed (e.g. LAN ranges)
 }
-// Update and Get carry the same allowed_geos field.
+// Update carries the same allowed_geos/allowed_cidrs fields; Get carries
+// them as fields 6 and 8.
 ```
 
-`Get`/`List` populate `ServiceEntry.AllowedGeos`, which lets the controller
-compare desired state (annotation) with the router's actual state. Geos are
-compared as a set, so reordering the annotation does not churn the router.
+`Get`/`List` populate `ServiceEntry.AllowedGeos` and `AllowedCIDRs`, which
+lets the controller compare desired state (annotations) with the router's
+actual state. Both are compared as sets, so reordering an annotation does
+not churn the router.
 
 ## Providers and configuration
 
@@ -124,7 +159,8 @@ cache.
 
 ## nftables enforcement
 
-For a service with a non-empty allow-list, the per-service chain is:
+For a service with a non-empty allow-list (`allowed-geos` or `allowed-cidrs`),
+the per-service chain is:
 
 ```text
 1. ip daddr <extIP> ip saddr not in @geo_<sn> counter drop
@@ -138,13 +174,17 @@ terminates chain evaluation and would skip DNAT (ADR 0001).
 
 - Set name: `geo_<sn>`, where `sn = safeName(serviceKey)`.
 - One interval set per service, containing the union of all allowed countries'
-  IPv4 CIDRs.
+  IPv4 CIDRs **plus** the static `allowed-cidrs` CIDRs.
 - Existing sets are flushed and repopulated in place; the deny rule's `SetID`
   stays valid, so no chain rebuild is needed on a database reload (ADR 0004).
 - The existing `RemoveRules` cleanup deletes sets whose name contains `sn`.
 - An unknown country (valid alpha-2, no CIDRs in the database) logs a warning,
   contributes no CIDRs, and keeps the deny rule — the service **fails closed**.
-- Services without `allowed_geos` keep the original DNAT-then-drop shape.
+- An invalid static CIDR in `validateService` rejects the whole service update;
+  at set-build time a bad entry is skipped with a warning so the rest of the
+  union still installs.
+- Services with neither `allowed-geos` nor `allowed-cidrs` keep the original
+  DNAT-then-drop shape.
 
 ## Reload path
 
@@ -163,8 +203,10 @@ Everything happens in-process; there is no cron job or restart:
 
 | Situation | Behaviour |
 |---|---|
-| No `geoip.provider` | daemon runs; `allowed_geos` requests get `InvalidArgument`; Service gets no status IP until configured |
+| No `geoip.provider` | daemon runs; `allowed_geos` requests get `InvalidArgument` (Service gets no status IP until configured); `allowed_cidrs`-only requests are accepted |
 | Invalid code in RPC | `InvalidArgument`; no state mutation |
+| Invalid CIDR in RPC | `InvalidArgument`; no state mutation |
+| Invalid CIDR in annotation | controller logs, keeps last-good CIDRs (`nil` on create), still reconciles ports/geos/status |
 | Provider download fails without cache | daemon exits at startup (fail closed) |
 
 The controller treats `InvalidArgument` as non-retryable: the reconcile fails

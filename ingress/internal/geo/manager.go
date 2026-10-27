@@ -119,14 +119,18 @@ func (m *Manager) SnapshotInUse() map[string]struct{} {
 }
 
 // ServiceCIDRs builds the per-service union map consumed by
-// nftables.Manager.RefreshGeoSets (see ADR 0004).
+// nftables.Manager.RefreshGeoSets (see ADR 0004). A service is included when
+// it has a non-empty country allow-list OR a non-empty static CIDR
+// allow-list; the union covers both. Static CIDRs are parsed defensively —
+// the RPC layer already validated them, but state may predate validation —
+// and invalid entries are skipped with a log.
 func (m *Manager) ServiceCIDRs() map[string][]*net.IPNet {
 	out := make(map[string][]*net.IPNet)
 	if m.st == nil {
 		return out
 	}
 	for key, svc := range m.st.Clone().Services {
-		if svc == nil || len(svc.AllowedGeos) == 0 {
+		if svc == nil || (len(svc.AllowedGeos) == 0 && len(svc.AllowedCIDRs) == 0) {
 			continue
 		}
 		var union []*net.IPNet
@@ -137,6 +141,18 @@ func (m *Manager) ServiceCIDRs() map[string][]*net.IPNet {
 				continue
 			}
 			union = append(union, nets...)
+		}
+		for _, raw := range svc.AllowedCIDRs {
+			_, ipNet, err := net.ParseCIDR(raw)
+			if err != nil {
+				m.logger.Error("skipping invalid static CIDR", "service", key, "cidr", raw, "error", err)
+				continue
+			}
+			if ipNet.IP.To4() == nil {
+				m.logger.Error("skipping non-IPv4 static CIDR", "service", key, "cidr", raw)
+				continue
+			}
+			union = append(union, ipNet)
 		}
 		out[key] = union
 	}

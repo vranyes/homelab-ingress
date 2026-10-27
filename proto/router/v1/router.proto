@@ -36,6 +36,7 @@ message CreateLoadBalancerRequest {
   repeated PortMapping ports = 2;
   repeated string allowed_geos = 3; // ISO-3166 alpha-2 country codes
   RateLimit rate_limit = 4;          // absent disables rate limiting
+  repeated string allowed_cidrs = 5; // IPv4 CIDRs always allowed (e.g. LAN ranges)
 }
 
 message CreateLoadBalancerResponse {
@@ -47,6 +48,7 @@ message UpdateLoadBalancerRequest {
   repeated PortMapping ports = 2;
   repeated string allowed_geos = 3; // ISO-3166 alpha-2 country codes
   RateLimit rate_limit = 4;          // absent clears the rate limit
+  repeated string allowed_cidrs = 5; // IPv4 CIDRs always allowed (e.g. LAN ranges)
 }
 
 message UpdateLoadBalancerResponse {}
@@ -69,6 +71,7 @@ message GetLoadBalancerResponse {
   string interface_name = 5;
   repeated string allowed_geos = 6; // ISO-3166 alpha-2 country codes
   RateLimit rate_limit = 7;          // absent means rate limiting is disabled
+  repeated string allowed_cidrs = 8; // IPv4 CIDRs always allowed (e.g. LAN ranges)
 }
 
 message ListLoadBalancersRequest {}

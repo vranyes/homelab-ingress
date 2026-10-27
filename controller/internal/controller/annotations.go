@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"math"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,6 +15,10 @@ const (
 	AnnotationPrefix      = "homelab-ingress.vranyes.com"
 	AnnotationSkip        = AnnotationPrefix + "/skip"
 	AnnotationAllowedGeos = AnnotationPrefix + "/allowed-geos"
+	// AnnotationAllowedCIDRs is a comma-separated list of IPv4 CIDRs that are
+	// always allowed alongside the allowed-geos country list (e.g. LAN ranges
+	// such as 192.168.1.0/24, which have no country in the geo database).
+	AnnotationAllowedCIDRs = AnnotationPrefix + "/allowed-cidrs"
 	// AnnotationRateLimit is the sustained number of new connections per
 	// second allowed from a single source IP. Absent disables rate limiting.
 	AnnotationRateLimit = AnnotationPrefix + "/rate-limit"
@@ -103,6 +108,47 @@ func AllowedGeos(svc *corev1.Service) []string {
 		return nil
 	}
 	return out
+}
+
+// AllowedCIDRs parses the allowed-cidrs annotation into normalised IPv4 CIDR
+// strings. Entries are trimmed, canonicalised via IPNet.String(), and
+// de-duplicated. A missing or empty annotation yields (nil, nil): no static
+// CIDR allow-list. Any invalid entry (unparseable CIDR or IPv6) returns an
+// error so the reconciler keeps the last-good CIDRs instead of silently
+// allowing all traffic.
+func AllowedCIDRs(svc *corev1.Service) ([]string, error) {
+	if svc == nil || svc.Annotations == nil {
+		return nil, nil
+	}
+	raw := svc.Annotations[AnnotationAllowedCIDRs]
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s %q: %q is not a valid CIDR", AnnotationAllowedCIDRs, raw, trimmed)
+		}
+		if ipNet.IP.To4() == nil {
+			return nil, fmt.Errorf("invalid %s %q: %q is not an IPv4 CIDR", AnnotationAllowedCIDRs, raw, trimmed)
+		}
+		canonical := ipNet.String()
+		if _, dup := seen[canonical]; dup {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func ShouldSkip(svc *corev1.Service) bool {

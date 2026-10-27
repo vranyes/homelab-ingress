@@ -227,19 +227,23 @@ func (m *Manager) AddRules(service state.LBService) error {
 
 // planRules builds the ordered rule set for a service:
 //
-//  1. geo deny (only when AllowedGeos is non-empty) — must precede DNAT,
+//  1. geo deny (only when AllowedGeos or AllowedCIDRs is non-empty) — must
+//     precede DNAT,
 //  2. one DNAT rule per port mapping,
 //  3. the final daddr drop.
 //
-// It is separated from AddRules so tests can assert ordering without parsing
-// netlink messages.
+// The country allow-list and the static CIDR allow-list form one union: a
+// packet is accepted when its source is in any allowed country OR any static
+// CIDR. Static CIDRs need no country database, so a CIDR-only service builds
+// its set even when geoLookup is nil; a country allow-list without a database
+// still fails closed.
 func (m *Manager) planRules(c *nftables.Conn, ss setStore, table *nftables.Table, chain *nftables.Chain, service state.LBService) ([]*nftables.Rule, error) {
 	sn := safeName(service.ServiceName)
 	extIP := service.SourceAddress
 	var rules []*nftables.Rule
 
-	if len(service.AllowedGeos) > 0 {
-		if m.geoLookup == nil {
+	if len(service.AllowedGeos)+len(service.AllowedCIDRs) > 0 {
+		if len(service.AllowedGeos) > 0 && m.geoLookup == nil {
 			return nil, fmt.Errorf("service %s has allowed_geos but no geo database is configured", service.ServiceName)
 		}
 		var cidrs []*net.IPNet
@@ -250,6 +254,16 @@ func (m *Manager) planRules(c *nftables.Conn, ss setStore, table *nftables.Table
 				continue
 			}
 			cidrs = append(cidrs, nets...)
+		}
+		for _, raw := range service.AllowedCIDRs {
+			_, ipNet, err := net.ParseCIDR(raw)
+			if err != nil || ipNet.IP.To4() == nil {
+				// validateService rejects these before rules are planned;
+				// skip defensively so one bad entry cannot drop the union.
+				m.logger.Warn("skipping invalid static CIDR", "service", service.ServiceName, "cidr", raw)
+				continue
+			}
+			cidrs = append(cidrs, ipNet)
 		}
 		set, err := buildGeoUnionSet(ss, table, sn, cidrs)
 		if err != nil {

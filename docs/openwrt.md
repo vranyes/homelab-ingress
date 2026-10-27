@@ -86,8 +86,10 @@ kubectl -n default rollout restart deployment/homelab-ingress-controller
 
 Notes:
 
-- `geoip_provider` unset means geo-blocking is off, and any Service carrying
+- `geoip_provider` unset means country-based geo-blocking is off, and any Service carrying
   `homelab-ingress.vranyes.com/allowed-geos` is rejected (ADR 0003).
+  The `homelab-ingress.vranyes.com/allowed-cidrs` static allow-list needs no
+  provider and still works.
 - `geoip_provider 'mock'` is for e2e fixtures only (script warns; daemon requires a readable TSV).
 - `dbip` data is CC BY 4.0 and requires attribution to
   [DB-IP](https://db-ip.com).
