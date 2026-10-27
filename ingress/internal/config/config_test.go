@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -310,6 +311,65 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.GRPC.Listen != DefaultGRPCListen {
 		t.Errorf("expected grpc.listen %q, got %q", DefaultGRPCListen, cfg.GRPC.Listen)
 	}
+}
+
+func TestLoadConfig_Healthcheck(t *testing.T) {
+	t.Run("defaults apply when the block is absent", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "config.yaml")
+		content := `base_interface: eth0
+auth:
+  issuer: https://issuer.example.com
+  audience: https://api.example.com
+  allowed_subjects:
+  - test-subject
+`
+		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := LoadConfig(cfgPath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Healthcheck.Interval != 10*time.Second {
+			t.Errorf("interval default = %v", cfg.Healthcheck.Interval)
+		}
+		if cfg.Healthcheck.FailThreshold != 2 || cfg.Healthcheck.SuccessThreshold != 2 {
+			t.Errorf("threshold defaults = %d/%d, want 2/2",
+				cfg.Healthcheck.FailThreshold, cfg.Healthcheck.SuccessThreshold)
+		}
+	})
+
+	t.Run("explicit values win", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "config.yaml")
+		content := `base_interface: eth0
+auth:
+  issuer: https://issuer.example.com
+  audience: https://api.example.com
+  allowed_subjects:
+  - test-subject
+healthcheck:
+  fail_threshold: 3
+  success_threshold: 4
+`
+		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := LoadConfig(cfgPath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Healthcheck.FailThreshold != 3 || cfg.Healthcheck.SuccessThreshold != 4 {
+			t.Errorf("thresholds = %d/%d, want 3/4",
+				cfg.Healthcheck.FailThreshold, cfg.Healthcheck.SuccessThreshold)
+		}
+		if cfg.Healthcheck.Interval <= 0 || cfg.Healthcheck.Timeout <= 0 {
+			t.Errorf("durations must default when unset: %+v", cfg.Healthcheck)
+		}
+	})
 }
 
 func TestLoadConfig_Validation(t *testing.T) {

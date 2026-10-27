@@ -6,6 +6,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -81,6 +83,17 @@ func (p *IPPoller) poll(ctx context.Context) error {
 			log.Info("detected IP change", "service", entry.ServiceKey, "old", currentIP, "new", entry.AssignedIP)
 			patch := client.MergeFrom(svc.DeepCopy())
 			svc.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: entry.AssignedIP}}
+			// Keep HomelabIngressReady truthful: the poller is the writer
+			// when the daemon reassigns the address (DHCP), so it owns the
+			// condition on this path too. MergeFrom preserves the rest of
+			// the status.
+			meta.SetStatusCondition(&svc.Status.Conditions, metav1.Condition{
+				Type:               ConditionHomelabIngressReady,
+				Status:             metav1.ConditionTrue,
+				Reason:             ReasonProvisioned,
+				Message:            "assigned IP " + entry.AssignedIP,
+				ObservedGeneration: svc.Generation,
+			})
 			if err := p.Status().Patch(ctx, &svc, patch); err != nil {
 				log.Error(err, "failed to patch service status", "service", entry.ServiceKey)
 				continue

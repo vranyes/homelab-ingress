@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/vranyes/homelab-ingress/ingress/internal/metrics"
 	"github.com/vranyes/homelab-ingress/ingress/internal/state"
 )
 
@@ -125,6 +127,24 @@ func (m *Manager) onIPChange(iface string, ip net.IP, mask net.IPMask) {
 	m.persistLease(iface, key)
 }
 
+// leaseExpiryUnix returns the Unix timestamp at which the lease expires,
+// derived from the ACK's advertised lease time. It returns 0 when the lease
+// carries no usable expiry (unknown).
+func leaseExpiryUnix(info *LeaseInfo) int64 {
+	if info == nil || len(info.ACKBytes) == 0 {
+		return 0
+	}
+	ack, err := dhcpv4.FromBytes(info.ACKBytes)
+	if err != nil || ack == nil {
+		return 0
+	}
+	d := ack.IPAddressLeaseTime(0)
+	if d <= 0 {
+		return 0
+	}
+	return time.Now().Add(d).Unix()
+}
+
 func maskEqual(a, b net.IPMask) bool {
 	if len(a) != len(b) {
 		return false
@@ -150,6 +170,7 @@ func (m *Manager) persistLease(iface, serviceKey string) {
 		return
 	}
 	leaseInfo.ServiceName = serviceKey
+	metrics.SetDHCPLeaseExpiry(serviceKey, leaseExpiryUnix(leaseInfo))
 
 	data, err := json.Marshal(leaseInfo)
 	if err != nil {
@@ -301,6 +322,7 @@ func (m *Manager) handleDelete(ifname string, serviceKey string) {
 	if err := m.st.DeleteLease(serviceKey); err != nil {
 		m.logger.Error("failed to delete persisted DHCP lease", "service", serviceKey, "error", err)
 	}
+	metrics.DeleteDHCPLeaseExpiry(serviceKey)
 
 	if ifname == "" {
 		ifname = m.deleteServiceMapping(serviceKey)
@@ -361,9 +383,11 @@ func (m *Manager) reconcile() {
 				if err := m.st.DeleteLease(staleKey); err != nil {
 					m.logger.Error("failed to delete persisted lease for stale client", "service", staleKey, "interface", iface, "error", err)
 				}
+				metrics.DeleteDHCPLeaseExpiry(staleKey)
 			}
 
 			m.remove(iface)
 		}
 	}
+	metrics.ObserveReconcile("dhcp", nil)
 }

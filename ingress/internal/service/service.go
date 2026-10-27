@@ -61,6 +61,16 @@ func (s *RouterServer) CreateLoadBalancer(ctx context.Context, req *routerv1.Cre
 		return nil, err
 	}
 
+	denied, err := cidrsFromRequest(req.DeniedCidrs)
+	if err != nil {
+		return nil, err
+	}
+
+	lbPolicy, err := lbPolicyFromRequest(req.LbPolicy)
+	if err != nil {
+		return nil, err
+	}
+
 	rateLimit, err := rateLimitFromProto(req.RateLimit)
 	if err != nil {
 		return nil, err
@@ -72,6 +82,8 @@ func (s *RouterServer) CreateLoadBalancer(ctx context.Context, req *routerv1.Cre
 		Targets:      ports,
 		AllowedGeos:  geos,
 		AllowedCIDRs: cidrs,
+		DeniedCIDRs:  denied,
+		LBPolicy:     lbPolicy,
 		RateLimit:    rateLimit,
 	}
 	s.stateData.UpdateService(svc)
@@ -104,6 +116,16 @@ func (s *RouterServer) UpdateLoadBalancer(ctx context.Context, req *routerv1.Upd
 		return nil, err
 	}
 
+	denied, err := cidrsFromRequest(req.DeniedCidrs)
+	if err != nil {
+		return nil, err
+	}
+
+	lbPolicy, err := lbPolicyFromRequest(req.LbPolicy)
+	if err != nil {
+		return nil, err
+	}
+
 	rateLimit, err := rateLimitFromProto(req.RateLimit)
 	if err != nil {
 		return nil, err
@@ -115,6 +137,8 @@ func (s *RouterServer) UpdateLoadBalancer(ctx context.Context, req *routerv1.Upd
 	updated.Targets = protoPortsToState(req.Ports)
 	updated.AllowedGeos = geos
 	updated.AllowedCIDRs = cidrs
+	updated.DeniedCIDRs = denied
+	updated.LBPolicy = lbPolicy
 	updated.RateLimit = rateLimit
 	s.stateData.UpdateService(updated)
 
@@ -156,6 +180,8 @@ func (s *RouterServer) GetLoadBalancer(ctx context.Context, req *routerv1.GetLoa
 		Ports:        statePortsToProto(svc.Targets),
 		AllowedGeos:  svc.AllowedGeos,
 		AllowedCidrs: svc.AllowedCIDRs,
+		DeniedCidrs:  svc.DeniedCIDRs,
+		LbPolicy:     svc.LBPolicy,
 		RateLimit:    stateRateLimitToProto(svc.RateLimit),
 	}
 	if svc.SourceAddress != nil {
@@ -183,6 +209,8 @@ func (s *RouterServer) ListLoadBalancers(ctx context.Context, req *routerv1.List
 			Ports:        statePortsToProto(svc.Targets),
 			AllowedGeos:  svc.AllowedGeos,
 			AllowedCidrs: svc.AllowedCIDRs,
+			DeniedCidrs:  svc.DeniedCIDRs,
+			LbPolicy:     svc.LBPolicy,
 			RateLimit:    stateRateLimitToProto(svc.RateLimit),
 		}
 		// Mirror GetLoadBalancer: a DHCP-pending service has no source
@@ -311,6 +339,18 @@ func cidrsFromRequest(in []string) ([]string, error) {
 		return nil, nil
 	}
 	return out, nil
+}
+
+// lbPolicyFromRequest normalises the load-balancing policy. Empty means the
+// default (round-robin) and is stored as-is; unknown values are rejected.
+func lbPolicyFromRequest(in string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(in))
+	switch trimmed {
+	case "", "round-robin", "hash-source-ip", "random":
+		return trimmed, nil
+	default:
+		return "", status.Errorf(codes.InvalidArgument, "invalid lb_policy %q: want round-robin, hash-source-ip or random", in)
+	}
 }
 
 func protoPortsToState(ports []*routerv1.PortMapping) []state.LBTarget {

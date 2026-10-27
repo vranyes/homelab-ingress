@@ -14,6 +14,7 @@ type MasqueradeRule struct {
 type options struct {
 	masqueradeRules []MasqueradeRule
 	geoLookup       GeoLookup
+	healthChecker   HealthChecker
 }
 
 type Option func(*options)
@@ -31,5 +32,22 @@ func WithMasquerade(inputDev, outputDev string) Option {
 func WithGeoLookup(lookup GeoLookup) Option {
 	return func(o *options) {
 		o.geoLookup = lookup
+	}
+}
+
+// HealthChecker reports whether a backend is currently considered healthy.
+// The nftables manager consults it at rule-build time to exclude down
+// backends from the DNAT maps. A nil checker (the default) disables
+// filtering. The health package's Checker implements this interface.
+type HealthChecker interface {
+	IsHealthy(serviceKey, addr string, port uint16) bool
+}
+
+// WithHealthChecker supplies the backend-health source used by AddRules.
+// Filtering is in-memory at rule-build time only; persisted State is never
+// mutated.
+func WithHealthChecker(hc HealthChecker) Option {
+	return func(o *options) {
+		o.healthChecker = hc
 	}
 }

@@ -39,6 +39,8 @@ type LBService struct {
 	Targets       []LBTarget       `json:"targets"`
 	AllowedGeos   []string         `json:"allowed_geos,omitempty"`
 	AllowedCIDRs  []string         `json:"allowed_cidrs,omitempty"`
+	DeniedCIDRs   []string         `json:"denied_cidrs,omitempty"`
+	LBPolicy      string           `json:"lb_policy,omitempty"`
 	RateLimit     *RateLimit       `json:"rate_limit,omitempty"`
 }
 
@@ -85,6 +87,10 @@ func (s *LBService) Clone() *LBService {
 	if s.AllowedCIDRs != nil {
 		cpy.AllowedCIDRs = make([]string, len(s.AllowedCIDRs))
 		copy(cpy.AllowedCIDRs, s.AllowedCIDRs)
+	}
+	if s.DeniedCIDRs != nil {
+		cpy.DeniedCIDRs = make([]string, len(s.DeniedCIDRs))
+		copy(cpy.DeniedCIDRs, s.DeniedCIDRs)
 	}
 	if s.RateLimit != nil {
 		rl := *s.RateLimit

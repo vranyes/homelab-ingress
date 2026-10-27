@@ -28,7 +28,9 @@ import (
 	"github.com/vranyes/homelab-ingress/ingress/internal/dhcp"
 	"github.com/vranyes/homelab-ingress/ingress/internal/geo"
 	"github.com/vranyes/homelab-ingress/ingress/internal/geoip"
+	"github.com/vranyes/homelab-ingress/ingress/internal/health"
 	"github.com/vranyes/homelab-ingress/ingress/internal/macvlan"
+	"github.com/vranyes/homelab-ingress/ingress/internal/metrics"
 	"github.com/vranyes/homelab-ingress/ingress/internal/router"
 	"github.com/vranyes/homelab-ingress/ingress/internal/router/nftables"
 	"github.com/vranyes/homelab-ingress/ingress/internal/service"
@@ -87,6 +89,10 @@ func main() {
 	}
 	defer st.Close()
 
+	// Prometheus exposition. An empty listen address disables the
+	// endpoint; startup must not depend on it.
+	metrics.Start(cfg.Metrics.Listen, logger)
+
 	linkMgr := macvlan.NewNetlinkManager(st, logger)
 	go linkMgr.Run(st.Subscribe())
 
@@ -117,7 +123,19 @@ func main() {
 		geoMgr = geo.NewManager(mm, st, logger, cfg.GeoIP.CachePath)
 	}
 
+	// Active TCP health-checking (ADR 0009). The checker probes backends on
+	// its own ticker; rule planning consults it via WithHealthChecker, and
+	// health flips trigger a reconcile so the DNAT maps converge between
+	// state events. It shares the main ctx, so shutdown cancels it cleanly.
+	checker := health.NewChecker(health.Config{
+		Interval:         cfg.Healthcheck.Interval,
+		Timeout:          cfg.Healthcheck.Timeout,
+		FailThreshold:    cfg.Healthcheck.FailThreshold,
+		SuccessThreshold: cfg.Healthcheck.SuccessThreshold,
+	}, logger)
+
 	var nftOpts []nftables.Option
+	nftOpts = append(nftOpts, nftables.WithHealthChecker(checker))
 	for _, r := range cfg.Masquerade {
 		nftOpts = append(nftOpts, nftables.WithMasquerade(r.InputDevice, r.OutputDevice))
 	}
@@ -136,6 +154,17 @@ func main() {
 	}
 	rmgr := router.NewManager(iml, st, logger)
 	go rmgr.Run(st.Subscribe())
+
+	checker.OnChange = func() {
+		// Reconcile off the probe loop: a health flip rebuilds the DNAT
+		// maps from the full backend list minus unhealthy entries.
+		go func() {
+			if err := rmgr.Reconcile(); err != nil {
+				logger.Error("health-triggered reconcile failed", "error", err)
+			}
+		}()
+	}
+	go checker.Run(ctx, st)
 
 	// reuse the same store instance created earlier
 	srv := service.NewRouterServer(st, logger)

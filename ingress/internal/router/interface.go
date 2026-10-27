@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/vranyes/homelab-ingress/ingress/internal/metrics"
 	"github.com/vranyes/homelab-ingress/ingress/internal/state"
 )
 
@@ -32,9 +33,11 @@ func NewManager(impl Implementor, st *state.State, logger *slog.Logger) *Manager
 func (m *Manager) Reconcile() error {
 	have, err := m.ListRules()
 	if err != nil {
+		metrics.ObserveReconcile("router", err)
 		return err
 	}
 	snap := m.st.Clone()
+	metrics.SetServicesTotal(len(snap.Services))
 	var e error
 	for _, has := range have {
 		if !snap.HasService(has) {
@@ -48,6 +51,7 @@ func (m *Manager) Reconcile() error {
 			e = errors.Join(e, fmt.Errorf("failed to add rules for service %s: %w", want.ServiceName, err))
 		}
 	}
+	metrics.ObserveReconcile("router", e)
 	return e
 }
 
@@ -72,6 +76,7 @@ func (m *Manager) Run(notif <-chan state.LBNotification) {
 					m.logger.Error("failed to remove rules for service", "service", event.Service, "error", err)
 				}
 			}
+			metrics.SetServicesTotal(len(m.st.Clone().Services))
 
 		case <-time.After(5 * time.Minute):
 			if err := m.Reconcile(); err != nil {

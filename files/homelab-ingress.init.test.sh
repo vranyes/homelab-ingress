@@ -80,6 +80,7 @@ set_opt base_interface br-wan.201
 set_opt state_dir "$T/state"
 set_opt grpc_listen 0.0.0.0:50051
 set_opt ws_listen 0.0.0.0:50052
+set_opt metrics_listen 127.0.0.1:9102
 set_opt auth_issuer 'https://issuer.example.com/dex#frag'
 set_opt auth_audience "it's: tricky #really"
 set_opt auth_trusted_root_ca /etc/homelab-ingress/oidc-ca.pem
@@ -100,6 +101,7 @@ if start_service; then
 	check "geoip provider emitted" has "provider: 'dbip'"
 	check "duration passed through" has "refresh_interval: '12h'"
 	check "geoip cache defaults off flash" has "cache_path: '$T/geocache/geo.mmdb'"
+	check "metrics listen passed through" has "listen: '127.0.0.1:9102'"
 	check "generated file is not world-readable" sh -c "case \"\$(ls -l '$GENERATED_CONFIG')\" in -rw-------*) exit 0 ;; *) exit 1 ;; esac"
 	check "state dir passed as a flag" test "$PROCD_CMD" = "/usr/bin/true -config $GENERATED_CONFIG -state-dir $T/state"
 else
@@ -116,6 +118,7 @@ if start_service; then
 	ok "start_service succeeded"
 	check "grpc block omitted" sh -c "! grep -q '^grpc:' '$GENERATED_CONFIG'"
 	check "ws block omitted" sh -c "! grep -q '^ws:' '$GENERATED_CONFIG'"
+	check "metrics block omitted (daemon default :9102 applies)" sh -c "! grep -q '^metrics:' '$GENERATED_CONFIG'"
 	check "geoip block omitted" sh -c "! grep -q '^geoip:' '$GENERATED_CONFIG'"
 	check "no -state-dir flag" sh -c "case '$PROCD_CMD' in *state-dir*) exit 1 ;; *) exit 0 ;; esac"
 else

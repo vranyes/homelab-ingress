@@ -15,6 +15,30 @@ Layout
 - `cmd/controller` - binary entrypoint
 - `internal/` - implementation packages: `controller`, `router` (client), `config`
 
+Metrics
+- `--metrics-addr` is already live: it is wired to controller-runtime's
+  metrics server (`Metrics.BindAddress`), so `/metrics` serves the standard
+  controller-runtime (workqueue, client-go) series. No stub — nothing to do.
+
+Status conditions
+- Every reconciled Service carries a `HomelabIngressReady` status condition:
+  `True`/`Reason=Provisioned` once the router assigns an IP, `False` with
+  `Reason=Pending` while converging (no endpoints, unassigned IP) or
+  `Reason=RouterUnavailable` when the router cannot be reached.
+- Conditions are patched together with the ingress IP via a
+  `Status().Patch` + `MergeFrom` patch, so unrelated conditions are preserved;
+  steady-state reconciles are no-ops (no status churn). The IP poller keeps
+  the condition truthful on DHCP-driven reassignment too.
+
+Events
+- Warning events on the Service surface misconfiguration without hot-looping:
+  `InvalidAllowedGeos` (fully-invalid list degrades to allow-all),
+  `InvalidAllowedCIDRs` / `InvalidDeniedCIDRs` (keeps last-good CIDRs),
+  `InvalidRateLimit` (keeps the previous limit), `RouterUnavailable`
+  (transient router errors; reconciles after 5s), `GeoBlockingUnavailable`
+  (service requests `allowed-geos` but the daemon has no country database).
+- `kubectl describe svc <name>` shows them under Events.
+
 Notes
 - Leader election is disabled; do not run two replicas against the same router.
 - Health probe is hardcoded to `:8081`; keep `--metrics-addr` distinct.
@@ -35,6 +59,10 @@ Geo-blocking
   list — e.g. so LAN clients are not locked out. Either annotation non-empty
   means deny-by-default with a union set. Invalid CIDRs keep the last-good CIDRs (none on first install)
   and still reconcile (fail closed, no hot-loop); IPv6 is rejected.
+- `homelab-ingress.vranyes.com/denied-cidrs` adds static IPv4 CIDRs that are
+  always denied, evaluated before the allow-list — a denied source is dropped
+  even when it is also allowed. Same format, validation, and fail-closed
+  last-good rules as `allowed-cidrs`; IPv6 is rejected.
 - Absent/empty (both annotations) means allow all. No CRD or extra RBAC needed.
 - The daemon resolves countries to CIDRs. Requires `geoip.provider`;
   otherwise a non-empty geos list fails and sets no status IP (a CIDR-only
@@ -55,6 +83,20 @@ Rate limiting
 - Positive integers only; malformed values keep the existing limit (none on
   first install); rest still reconciles.
 - Per Service, per source IP, new connections only, across all ports.
+
+Load-balancing policy
+- Select backend spread with one annotation:
+
+  ```yaml
+  metadata:
+    annotations:
+      homelab-ingress.vranyes.com/lb-policy: "hash-source-ip"
+  ```
+
+- Values: `round-robin` (default, also when absent), `hash-source-ip`
+  (client-IP stickiness), `random`. Normalised (trim/lowercase) and compared
+  per reconcile; unknown values keep the last-good policy (default on first
+  install). `least-conn` is not supported.
 
 CA and TLS
 - Verifies ingress with CA from `--ca-path` (`homelab-ingress-ca` at

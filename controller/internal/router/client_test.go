@@ -28,34 +28,42 @@ import (
 
 type fakeServer struct {
 	routerv1.UnimplementedRouterServiceServer
-	mu          sync.Mutex
-	services    map[string]*routerv1.GetLoadBalancerResponse
-	createErr   error
-	updateErr   error
-	deleteErr   error
-	getErr      error
-	listErr     error
-	healthErr   error
-	createCalls []string
-	updateCalls []string
-	deleteCalls []string
-	createGeos  map[string][]string
-	updateGeos  map[string][]string
-	createCidrs map[string][]string
-	updateCidrs map[string][]string
-	createRate  map[string]*routerv1.RateLimit
-	updateRate  map[string]*routerv1.RateLimit
+	mu           sync.Mutex
+	services     map[string]*routerv1.GetLoadBalancerResponse
+	createErr    error
+	updateErr    error
+	deleteErr    error
+	getErr       error
+	listErr      error
+	healthErr    error
+	createCalls  []string
+	updateCalls  []string
+	deleteCalls  []string
+	createGeos   map[string][]string
+	updateGeos   map[string][]string
+	createCidrs  map[string][]string
+	updateCidrs  map[string][]string
+	createDenied map[string][]string
+	updateDenied map[string][]string
+	createPolicy map[string]string
+	updatePolicy map[string]string
+	createRate   map[string]*routerv1.RateLimit
+	updateRate   map[string]*routerv1.RateLimit
 }
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{
-		services:    make(map[string]*routerv1.GetLoadBalancerResponse),
-		createGeos:  make(map[string][]string),
-		updateGeos:  make(map[string][]string),
-		createCidrs: make(map[string][]string),
-		updateCidrs: make(map[string][]string),
-		createRate:  make(map[string]*routerv1.RateLimit),
-		updateRate:  make(map[string]*routerv1.RateLimit),
+		services:     make(map[string]*routerv1.GetLoadBalancerResponse),
+		createGeos:   make(map[string][]string),
+		updateGeos:   make(map[string][]string),
+		createCidrs:  make(map[string][]string),
+		updateCidrs:  make(map[string][]string),
+		createDenied: make(map[string][]string),
+		updateDenied: make(map[string][]string),
+		createPolicy: make(map[string]string),
+		updatePolicy: make(map[string]string),
+		createRate:   make(map[string]*routerv1.RateLimit),
+		updateRate:   make(map[string]*routerv1.RateLimit),
 	}
 }
 
@@ -65,6 +73,8 @@ func (f *fakeServer) CreateLoadBalancer(_ context.Context, req *routerv1.CreateL
 	f.createCalls = append(f.createCalls, req.ServiceKey)
 	f.createGeos[req.ServiceKey] = append([]string(nil), req.AllowedGeos...)
 	f.createCidrs[req.ServiceKey] = append([]string(nil), req.AllowedCidrs...)
+	f.createDenied[req.ServiceKey] = append([]string(nil), req.DeniedCidrs...)
+	f.createPolicy[req.ServiceKey] = req.LbPolicy
 	f.createRate[req.ServiceKey] = req.RateLimit
 	if f.createErr != nil {
 		return nil, f.createErr
@@ -75,6 +85,8 @@ func (f *fakeServer) CreateLoadBalancer(_ context.Context, req *routerv1.CreateL
 		Ports:         req.Ports,
 		AllowedGeos:   req.AllowedGeos,
 		AllowedCidrs:  req.AllowedCidrs,
+		DeniedCidrs:   req.DeniedCidrs,
+		LbPolicy:      req.LbPolicy,
 		RateLimit:     req.RateLimit,
 		DhcpAcquired:  false,
 		InterfaceName: "lb-" + req.ServiceKey,
@@ -88,6 +100,8 @@ func (f *fakeServer) UpdateLoadBalancer(_ context.Context, req *routerv1.UpdateL
 	f.updateCalls = append(f.updateCalls, req.ServiceKey)
 	f.updateGeos[req.ServiceKey] = append([]string(nil), req.AllowedGeos...)
 	f.updateCidrs[req.ServiceKey] = append([]string(nil), req.AllowedCidrs...)
+	f.updateDenied[req.ServiceKey] = append([]string(nil), req.DeniedCidrs...)
+	f.updatePolicy[req.ServiceKey] = req.LbPolicy
 	f.updateRate[req.ServiceKey] = req.RateLimit
 	if f.updateErr != nil {
 		return nil, f.updateErr
@@ -96,6 +110,8 @@ func (f *fakeServer) UpdateLoadBalancer(_ context.Context, req *routerv1.UpdateL
 		svc.Ports = req.Ports
 		svc.AllowedGeos = req.AllowedGeos
 		svc.AllowedCidrs = req.AllowedCidrs
+		svc.DeniedCidrs = req.DeniedCidrs
+		svc.LbPolicy = req.LbPolicy
 		svc.RateLimit = req.RateLimit
 	}
 	return &routerv1.UpdateLoadBalancerResponse{}, nil
@@ -269,7 +285,7 @@ func TestClient_Create(t *testing.T) {
 		ports := []PortMapping{
 			{Protocol: "tcp", ExternalPort: 80, Destinations: []Destination{{Addr: "10.42.0.10", Port: 8080}}},
 		}
-		entry, err := client.Create(context.Background(), "default/myapp", ports, []string{"US", "CA"}, []string{"192.168.1.0/24"}, &RateLimit{Rate: 5, Burst: 10})
+		entry, err := client.Create(context.Background(), "default/myapp", ports, []string{"US", "CA"}, []string{"192.168.1.0/24"}, []string{"203.0.113.0/24"}, "hash-source-ip", &RateLimit{Rate: 5, Burst: 10})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -291,8 +307,20 @@ func TestClient_Create(t *testing.T) {
 		if got := fake.createCidrs["default/myapp"]; len(got) != 1 || got[0] != "192.168.1.0/24" {
 			t.Errorf("request cidrs = %v", got)
 		}
+		if got := fake.createDenied["default/myapp"]; len(got) != 1 || got[0] != "203.0.113.0/24" {
+			t.Errorf("request denied cidrs = %v", got)
+		}
+		if got := fake.createPolicy["default/myapp"]; got != "hash-source-ip" {
+			t.Errorf("request lb policy = %q", got)
+		}
 		if len(entry.AllowedCIDRs) != 1 || entry.AllowedCIDRs[0] != "192.168.1.0/24" {
 			t.Errorf("entry cidrs = %v", entry.AllowedCIDRs)
+		}
+		if len(entry.DeniedCIDRs) != 1 || entry.DeniedCIDRs[0] != "203.0.113.0/24" {
+			t.Errorf("entry denied cidrs = %v", entry.DeniedCIDRs)
+		}
+		if entry.LBPolicy != "hash-source-ip" {
+			t.Errorf("entry lb policy = %q", entry.LBPolicy)
 		}
 		if len(fake.createCalls) != 1 || fake.createCalls[0] != "default/myapp" {
 			t.Errorf("expected create call for default/myapp")
@@ -303,7 +331,7 @@ func TestClient_Create(t *testing.T) {
 		fake.createErr = fmt.Errorf("router down")
 		defer func() { fake.createErr = nil }()
 
-		_, err := client.Create(context.Background(), "default/fail", nil, nil, nil, nil)
+		_, err := client.Create(context.Background(), "default/fail", nil, nil, nil, nil, "", nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -331,7 +359,7 @@ func TestClient_Update(t *testing.T) {
 		ports := []PortMapping{
 			{Protocol: "tcp", ExternalPort: 443, Destinations: []Destination{{Addr: "10.42.0.10", Port: 8443}, {Addr: "10.42.0.11", Port: 8443}}},
 		}
-		err := client.Update(context.Background(), "default/myapp", ports, []string{"EU"}, []string{"10.0.0.0/8"}, &RateLimit{Rate: 7, Burst: 9})
+		err := client.Update(context.Background(), "default/myapp", ports, []string{"EU"}, []string{"10.0.0.0/8"}, []string{"203.0.113.0/24"}, "random", &RateLimit{Rate: 7, Burst: 9})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -340,6 +368,12 @@ func TestClient_Update(t *testing.T) {
 		}
 		if got := fake.updateCidrs["default/myapp"]; len(got) != 1 || got[0] != "10.0.0.0/8" {
 			t.Errorf("update cidrs = %v", got)
+		}
+		if got := fake.updateDenied["default/myapp"]; len(got) != 1 || got[0] != "203.0.113.0/24" {
+			t.Errorf("update denied cidrs = %v", got)
+		}
+		if got := fake.updatePolicy["default/myapp"]; got != "random" {
+			t.Errorf("update lb policy = %q", got)
 		}
 		if got := fake.updateRate["default/myapp"]; got == nil || got.Rate != 7 || got.Burst != 9 {
 			t.Errorf("update rate limit = %+v", got)
@@ -353,7 +387,7 @@ func TestClient_Update(t *testing.T) {
 		fake.updateErr = fmt.Errorf("router down")
 		defer func() { fake.updateErr = nil }()
 
-		err := client.Update(context.Background(), "default/fail", nil, nil, nil, nil)
+		err := client.Update(context.Background(), "default/fail", nil, nil, nil, nil, "", nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -412,6 +446,8 @@ func TestClient_Get(t *testing.T) {
 		InterfaceName: "lb-default-myapp",
 		AllowedGeos:   []string{"US"},
 		AllowedCidrs:  []string{"192.168.1.0/24"},
+		DeniedCidrs:   []string{"203.0.113.0/24"},
+		LbPolicy:      "random",
 		RateLimit:     &routerv1.RateLimit{Rate: 5, Burst: 10},
 	}
 	t.Run("gets existing service", func(t *testing.T) {
@@ -436,6 +472,12 @@ func TestClient_Get(t *testing.T) {
 		}
 		if len(entry.AllowedCIDRs) != 1 || entry.AllowedCIDRs[0] != "192.168.1.0/24" {
 			t.Errorf("cidrs mismatch: %+v", entry.AllowedCIDRs)
+		}
+		if len(entry.DeniedCIDRs) != 1 || entry.DeniedCIDRs[0] != "203.0.113.0/24" {
+			t.Errorf("denied cidrs mismatch: %+v", entry.DeniedCIDRs)
+		}
+		if entry.LBPolicy != "random" {
+			t.Errorf("lb policy mismatch: %q", entry.LBPolicy)
 		}
 	})
 
@@ -582,6 +624,8 @@ func TestFromProto(t *testing.T) {
 		InterfaceName: "lb-ns-svc",
 		RateLimit:     &routerv1.RateLimit{Rate: 3, Burst: 4},
 		AllowedCidrs:  []string{"10.0.0.0/8"},
+		DeniedCidrs:   []string{"203.0.113.0/24"},
+		LbPolicy:      "hash-source-ip",
 		Ports: []*routerv1.PortMapping{
 			{Protocol: "tcp", SrcPort: 443, Dst: []*routerv1.Destination{
 				{Addr: "10.0.0.1", Port: 8443},
@@ -607,6 +651,12 @@ func TestFromProto(t *testing.T) {
 	}
 	if len(entry.AllowedCIDRs) != 1 || entry.AllowedCIDRs[0] != "10.0.0.0/8" {
 		t.Errorf("expected cidrs [10.0.0.0/8], got %+v", entry.AllowedCIDRs)
+	}
+	if len(entry.DeniedCIDRs) != 1 || entry.DeniedCIDRs[0] != "203.0.113.0/24" {
+		t.Errorf("expected denied cidrs [203.0.113.0/24], got %+v", entry.DeniedCIDRs)
+	}
+	if entry.LBPolicy != "hash-source-ip" {
+		t.Errorf("expected lb policy hash-source-ip, got %q", entry.LBPolicy)
 	}
 	if len(entry.Ports) != 1 {
 		t.Fatalf("expected 1 port, got %d", len(entry.Ports))

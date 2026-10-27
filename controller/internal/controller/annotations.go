@@ -19,6 +19,14 @@ const (
 	// always allowed alongside the allowed-geos country list (e.g. LAN ranges
 	// such as 192.168.1.0/24, which have no country in the geo database).
 	AnnotationAllowedCIDRs = AnnotationPrefix + "/allowed-cidrs"
+	// AnnotationDeniedCIDRs is a comma-separated list of IPv4 CIDRs that are
+	// always denied. The deny set is evaluated before the allow-list, so a
+	// denied source is dropped even when it is also in the allow-list.
+	AnnotationDeniedCIDRs = AnnotationPrefix + "/denied-cidrs"
+	// AnnotationLBPolicy selects the backend load-balancing policy:
+	// round-robin (default), hash-source-ip or random. Unknown values keep
+	// the last-good policy.
+	AnnotationLBPolicy = AnnotationPrefix + "/lb-policy"
 	// AnnotationRateLimit is the sustained number of new connections per
 	// second allowed from a single source IP. Absent disables rate limiting.
 	AnnotationRateLimit = AnnotationPrefix + "/rate-limit"
@@ -149,6 +157,85 @@ func AllowedCIDRs(svc *corev1.Service) ([]string, error) {
 		return nil, nil
 	}
 	return out, nil
+}
+
+// DeniedCIDRs parses the denied-cidrs annotation into normalised IPv4 CIDR
+// strings. Semantics mirror AllowedCIDRs: entries are trimmed, canonicalised
+// via IPNet.String(), and de-duplicated; any invalid entry (unparseable CIDR
+// or IPv6) returns an error so the reconciler keeps the last-good CIDRs.
+func DeniedCIDRs(svc *corev1.Service) ([]string, error) {
+	if svc == nil || svc.Annotations == nil {
+		return nil, nil
+	}
+	raw := svc.Annotations[AnnotationDeniedCIDRs]
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s %q: %q is not a valid CIDR", AnnotationDeniedCIDRs, raw, trimmed)
+		}
+		if ipNet.IP.To4() == nil {
+			return nil, fmt.Errorf("invalid %s %q: %q is not an IPv4 CIDR", AnnotationDeniedCIDRs, raw, trimmed)
+		}
+		canonical := ipNet.String()
+		if _, dup := seen[canonical]; dup {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// LBPolicy values. The default (missing annotation) is round-robin.
+const (
+	LBPolicyRoundRobin   = "round-robin"
+	LBPolicyHashSourceIP = "hash-source-ip"
+	LBPolicyRandom       = "random"
+)
+
+// LBPolicyFromAnnotations parses the lb-policy annotation into its canonical
+// form. A missing or empty annotation yields the default (round-robin). An
+// unknown value returns an error so the reconciler keeps the last-good
+// policy instead of silently changing load balancing.
+func LBPolicyFromAnnotations(svc *corev1.Service) (string, error) {
+	if svc == nil || svc.Annotations == nil {
+		return LBPolicyRoundRobin, nil
+	}
+	raw, ok := svc.Annotations[AnnotationLBPolicy]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return LBPolicyRoundRobin, nil
+	}
+	switch policy := strings.ToLower(strings.TrimSpace(raw)); policy {
+	case LBPolicyRoundRobin, LBPolicyHashSourceIP, LBPolicyRandom:
+		return policy, nil
+	default:
+		return "", fmt.Errorf("invalid %s %q: want round-robin, hash-source-ip or random", AnnotationLBPolicy, raw)
+	}
+}
+
+// lbPolicyChanged compares the canonical policy forms. The ingress treats an
+// empty policy as the default round-robin, so they compare equal.
+func lbPolicyChanged(existing, desired string) bool {
+	return canonicalPolicy(existing) != canonicalPolicy(desired)
+}
+
+func canonicalPolicy(policy string) string {
+	if strings.TrimSpace(policy) == "" {
+		return LBPolicyRoundRobin
+	}
+	return strings.ToLower(strings.TrimSpace(policy))
 }
 
 func ShouldSkip(svc *corev1.Service) bool {

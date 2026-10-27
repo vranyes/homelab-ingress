@@ -13,6 +13,7 @@ import (
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"github.com/mdlayher/netlink"
+	"github.com/vranyes/homelab-ingress/ingress/internal/metrics"
 	"github.com/vranyes/homelab-ingress/ingress/internal/state"
 )
 
@@ -21,6 +22,7 @@ type Manager struct {
 	mu        sync.Mutex
 	logger    *slog.Logger
 	geoLookup GeoLookup
+	health    HealthChecker
 }
 
 func NewManager(logger *slog.Logger, opts ...Option) *Manager {
@@ -117,7 +119,7 @@ func NewManager(logger *slog.Logger, opts ...Option) *Manager {
 		return &Manager{logger: logger}
 	}
 
-	return &Manager{conn: conn, logger: logger, geoLookup: o.geoLookup}
+	return &Manager{conn: conn, logger: logger, geoLookup: o.geoLookup, health: o.healthChecker}
 }
 
 func (m *Manager) ListRules() ([]string, error) {
@@ -152,7 +154,12 @@ func (m *Manager) ListRules() ([]string, error) {
 	return services, nil
 }
 
-func (m *Manager) AddRules(service state.LBService) error {
+func (m *Manager) AddRules(service state.LBService) (err error) {
+	defer func() {
+		if err != nil {
+			metrics.IncNftApplyError(metrics.OpAdd)
+		}
+	}()
 	m.logger.Debug("adding firewall rules", "service", service.ServiceName)
 	if err := validateService(service); err != nil {
 		return err
@@ -227,10 +234,13 @@ func (m *Manager) AddRules(service state.LBService) error {
 
 // planRules builds the ordered rule set for a service:
 //
-//  1. geo deny (only when AllowedGeos or AllowedCIDRs is non-empty) — must
+//  1. deny CIDRs (when DeniedCIDRs is non-empty) — always dropped, even when
+//     the source is also in the allow-list,
+//  2. geo deny (only when AllowedGeos or AllowedCIDRs is non-empty) — must
 //     precede DNAT,
-//  2. one DNAT rule per port mapping,
-//  3. the final daddr drop.
+//  3. rate limit (only when RateLimit is set),
+//  4. one DNAT rule per port mapping,
+//  5. the final daddr drop.
 //
 // The country allow-list and the static CIDR allow-list form one union: a
 // packet is accepted when its source is in any allowed country OR any static
@@ -242,6 +252,28 @@ func (m *Manager) planRules(c *nftables.Conn, ss setStore, table *nftables.Table
 	extIP := service.SourceAddress
 	var rules []*nftables.Rule
 
+	if len(service.DeniedCIDRs) > 0 {
+		var cidrs []*net.IPNet
+		for _, raw := range service.DeniedCIDRs {
+			_, ipNet, err := net.ParseCIDR(raw)
+			if err != nil || ipNet.IP.To4() == nil {
+				// validateService rejects these before rules are planned;
+				// skip defensively so one bad entry cannot open the service.
+				m.logger.Warn("skipping invalid denied CIDR", "service", service.ServiceName, "cidr", raw)
+				continue
+			}
+			cidrs = append(cidrs, ipNet)
+		}
+		set, err := buildDenySet(ss, table, sn, cidrs)
+		if err != nil {
+			return nil, fmt.Errorf("build deny set: %w", err)
+		}
+		rules = append(rules, &nftables.Rule{
+			Table: table,
+			Chain: chain,
+			Exprs: buildDenySetDenyExprs(extIP, set),
+		})
+	}
 	if len(service.AllowedGeos)+len(service.AllowedCIDRs) > 0 {
 		if len(service.AllowedGeos) > 0 && m.geoLookup == nil {
 			return nil, fmt.Errorf("service %s has allowed_geos but no geo database is configured", service.ServiceName)
@@ -294,16 +326,24 @@ func (m *Manager) planRules(c *nftables.Conn, ss setStore, table *nftables.Table
 	}
 
 	for _, target := range service.Targets {
-		var mapping = make(map[string]uint16, len(target.Dst))
-		for _, d := range target.Dst {
+		// Exclude unhealthy TCP backends from the DNAT map. The filter is
+		// in-memory at rule-build time only: persisted State keeps the full
+		// backend list, and a fully-unhealthy target fails open to all
+		// backends (see filterHealthyTargets).
+		dsts := target.Dst
+		if m.health != nil {
+			dsts = filterHealthyTargets(service.ServiceName, target, m.health, m.logger)
+		}
+		var mapping = make(map[string]uint16, len(dsts))
+		for _, d := range dsts {
 			mapping[d.Address.String()] = d.Port
 		}
 
-		expr, err := buildRoundRobinExprs(
-			c, sn, table, extIP, target.Protocol, target.SrcPort, mapping,
+		expr, err := buildLBExprs(
+			c, sn, table, extIP, target.Protocol, target.SrcPort, mapping, service.LBPolicy,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("build round robin exprs: %w", err)
+			return nil, fmt.Errorf("build lb exprs: %w", err)
 		}
 		rules = append(rules, &nftables.Rule{
 			Table: table,
@@ -337,7 +377,12 @@ func (m *Manager) planRules(c *nftables.Conn, ss setStore, table *nftables.Table
 // RefreshGeoSets flushes and repopulates the per-service union sets after a
 // MaxMind reload (ADR 0004). Rules referencing a set by SetID stay valid across
 // FlushSet, so no chain rebuild is needed.
-func (m *Manager) RefreshGeoSets(svcCIDRs map[string][]*net.IPNet) error {
+func (m *Manager) RefreshGeoSets(svcCIDRs map[string][]*net.IPNet) (err error) {
+	defer func() {
+		if err != nil {
+			metrics.IncNftApplyError(metrics.OpRefresh)
+		}
+	}()
 	if m.conn == nil {
 		return fmt.Errorf("nftables connection not available")
 	}
@@ -372,7 +417,12 @@ func (m *Manager) refreshGeoSets(ss setStore, table *nftables.Table, svcCIDRs ma
 }
 
 // RemoveRules removes the chain and any associated LB map for serviceKey.
-func (m *Manager) RemoveRules(serviceKey string) error {
+func (m *Manager) RemoveRules(serviceKey string) (err error) {
+	defer func() {
+		if err != nil {
+			metrics.IncNftApplyError(metrics.OpRemove)
+		}
+	}()
 	m.logger.Info("removing firewall rules", "service", serviceKey)
 
 	m.mu.Lock()

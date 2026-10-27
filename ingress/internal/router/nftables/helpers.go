@@ -46,6 +46,20 @@ func validateService(svc state.LBService) error {
 			return fmt.Errorf("invalid CIDR %q: only IPv4 is supported", raw)
 		}
 	}
+	for _, raw := range svc.DeniedCIDRs {
+		_, ipNet, err := net.ParseCIDR(raw)
+		if err != nil {
+			return fmt.Errorf("invalid denied CIDR %q: must be in address/prefix form", raw)
+		}
+		if ipNet.IP.To4() == nil {
+			return fmt.Errorf("invalid denied CIDR %q: only IPv4 is supported", raw)
+		}
+	}
+	switch svc.LBPolicy {
+	case "", "round-robin", "hash-source-ip", "random":
+	default:
+		return fmt.Errorf("invalid lb_policy %q: want round-robin, hash-source-ip or random", svc.LBPolicy)
+	}
 	if svc.RateLimit != nil {
 		if svc.RateLimit.Rate == 0 {
 			return fmt.Errorf("rate_limit.rate must be greater than zero")

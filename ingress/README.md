@@ -105,12 +105,43 @@ type Implementor interface {
   `ct status dnat` traffic only — no per-IP/port matches
 - **Postrouting chain**: masquerades outbound traffic, but only for pairs
   configured via `WithMasquerade` / `masquerade` in the config (default: none)
-- Supports single-destination DNAT and round-robin load balancing via nftables sets/maps
+- Supports single-destination DNAT and load balancing via nftables sets/maps
+  with a per-service policy: `round-robin` (numgen inc, the default),
+  `random` (numgen random), or `hash-source-ip` (Jenkins hash over the
+  source address). All policies share the same index → backend map layout.
 - Per-service, per-source-IP new-connection rate limiting: a dynamic set
   (`rl_<sn>_<rate>_<burst>`) holds one token bucket per client IP, and a
   `meter`-style `limit rate over` expression drops excess packets. The set name
   includes the configuration, so changing rate/burst starts a fresh bucket; idle
   buckets expire after 10 minutes (see ADR 0007)
+
+### Health-checking (`internal/health/`)
+
+Active TCP health-checking is a second layer behind the controller's Ready
+endpoints, covering out-of-band failures (stale IPs, firewall changes,
+crashed pods with stale slices):
+
+- `Checker` snapshots `State` every `interval` (default 10s) and dials each
+  backend with `timeout` (default 2s). Hysteresis: `fail_threshold`
+  consecutive failures (default 2) mark a backend down, `success_threshold`
+  consecutive successes (default 2) mark it up again.
+- UDP targets are never probed and always healthy (no handshake to test);
+  unknown backends also report healthy, so planning fails open.
+- The nftables manager takes the checker via `WithHealthChecker` and excludes
+  unhealthy TCP backends from the DNAT maps at rule-build time only —
+  persisted `State` keeps the full list. If every backend is down, the full
+  set is kept and a `health_all_down` warning is logged (fail-open).
+- Health flips trigger a router reconcile via `OnChange`, so maps converge
+  between state events. Metrics: `homelab_ingress_backend_up{service,addr,port}`
+  and `homelab_ingress_backend_probes_total{service,result}` (see ADR 0009).
+
+```yaml
+healthcheck:
+  interval: 10s
+  timeout: 2s
+  fail_threshold: 2
+  success_threshold: 2
+```
 
 ### Geo-blocking (`internal/geoip/` and `internal/geo/`)
 
@@ -141,6 +172,15 @@ ip daddr <extIP> ip saddr not in @geo_<sn> counter drop
 followed by the DNAT rules and the final drop. The deny rule must precede DNAT
 (ADR 0001). An unknown country leaves the deny rule in place with an empty set,
 so it fails closed.
+
+A non-empty `denied_cidrs` list adds one more rule ahead of the geo deny:
+
+```text
+ip daddr <extIP> ip saddr in @deny_<sn> counter drop
+```
+
+so denied sources drop even when they are also allowed. Chain order is
+deny → geo deny → rate limit → DNAT → final drop.
 
 ### Macvlan (`internal/macvlan/`)
 
@@ -194,14 +234,28 @@ External gRPC interface (`RouterService`) for configuring load balancer rules.
 **RPCs:**
 
 - `CreateLoadBalancer` — defines a new service with port mappings and optional
-  `allowed_geos`
-- `UpdateLoadBalancer` — modifies port mappings or the geo allow-list
+  `allowed_geos`, `allowed_cidrs`, `denied_cidrs`, `lb_policy`, `rate_limit`
+- `UpdateLoadBalancer` — modifies port mappings or the geo/CIDR/policy/rate-limit config
 - `DeleteLoadBalancer` — removes a service
 - `GetLoadBalancer` / `ListLoadBalancers` — query current state, including
-  `allowed_geos`
+  `allowed_geos`, `allowed_cidrs`, `denied_cidrs`, `lb_policy`
 - `Health` — health check with active macvlan count (`Healthy`, `ActiveMacvlans`).
   The proto also defines `BaseInterface`, but the daemon currently leaves it
   empty.
+
+## Observability (`internal/metrics/`)
+
+The daemon serves Prometheus metrics on `/metrics` (default `:9102`,
+`metrics.listen` in YAML / `metrics_listen` in UCI; an empty listen address
+disables the endpoint and never breaks startup):
+
+| Metric | Type (labels) | Meaning |
+| ------ | ------------- | ------- |
+| `homelab_ingress_services_total` | gauge | Services currently in state (set by the router manager). |
+| `homelab_ingress_nft_apply_errors_total` | counter (`op=add/remove/refresh`) | nftables apply failures; incremented on every `AddRules`/`RemoveRules`/`RefreshGeoSets` error return. |
+| `homelab_ingress_geo_db_age_seconds` | gauge | Country-database file age as of the last geo reload (`-1` = never reloaded). |
+| `homelab_ingress_dhcp_lease_expiry_seconds` | gauge (`service`) | Unix timestamp at which the service DHCP lease expires (`0` = unknown; deleted with the service). |
+| `homelab_ingress_reconcile_total` | counter (`manager`, `result`) | Reconcile outcomes for the router, geo and DHCP managers. |
 
 ## Lifecycle Example
 
@@ -214,7 +268,9 @@ router writes DNAT rules.
 In `cmd/ingress/main.go`:
 
 1. Load configuration and state (SQLite `state.db`), reusing or creating the CA
-2. Start Macvlan, DHCP, and Router manager goroutines (each subscribes to `State`)
+2. Start Macvlan, DHCP, and Router manager goroutines (each subscribes to `State`),
+   plus the health-checker's probe loop (shares the shutdown ctx; wired to the
+   nftables manager via `WithHealthChecker` and to reconciles via `OnChange`)
 3. If `geoip.provider` is set: create the `geoip` manager, start its refresh
    goroutine, start the `geo` watcher, and wire `OnRebuild` to
    `nftables.RefreshGeoSets`
@@ -238,6 +294,9 @@ In `cmd/ingress/main.go`:
       "source_address": "192.168.1.100",
       "source_mask": "////AA==",
       "allowed_geos": ["US", "CA"],
+      "allowed_cidrs": ["192.168.1.0/24"],
+      "denied_cidrs": ["203.0.113.0/24"],
+      "lb_policy": "hash-source-ip",
       "rate_limit": { "rate": 5, "burst": 10 },
       "targets": [
         {
@@ -270,6 +329,7 @@ ingress/
 │   ├── dhcp/            # DHCP client management
 │   ├── geo/             # database watcher + per-service CIDR rebuild
 │   ├── geoip/           # MaxMind/DB-IP providers, downloader, TSV mock
+│   ├── health/           # active TCP backend health-checking (ADR 0009)
 │   ├── macvlan/         # Macvlan interface management
 │   ├── router/          # Router manager interface + nftables implementation
 │   │   └── nftables/    # nftables rule management

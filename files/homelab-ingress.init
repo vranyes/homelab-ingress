@@ -24,6 +24,7 @@ BASE_INTERFACE=
 STATE_DIR=
 GRPC_LISTEN=
 WS_LISTEN=
+METRICS_LISTEN=
 AUTH_ISSUER=
 AUTH_AUDIENCE=
 AUTH_ALLOWED_SUBJECTS=
@@ -83,6 +84,10 @@ generate_config() {
 		if [ -n "${WS_LISTEN}" ]; then
 			echo "ws:"
 			echo "  listen: $(yaml_str "${WS_LISTEN}")"
+		fi
+		if [ -n "${METRICS_LISTEN}" ]; then
+			echo "metrics:"
+			echo "  listen: $(yaml_str "${METRICS_LISTEN}")"
 		fi
 
 		echo "auth:"
@@ -202,6 +207,7 @@ start_service() {
 	config_get STATE_DIR "${SECTION}" state_dir ""
 	config_get GRPC_LISTEN "${SECTION}" grpc_listen ""
 	config_get WS_LISTEN "${SECTION}" ws_listen ""
+	config_get METRICS_LISTEN "${SECTION}" metrics_listen ""
 	config_get AUTH_ISSUER "${SECTION}" auth_issuer ""
 	config_get AUTH_AUDIENCE "${SECTION}" auth_audience ""
 	config_get AUTH_TRUSTED_ROOT_CA "${SECTION}" auth_trusted_root_ca ""

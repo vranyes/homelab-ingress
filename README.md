@@ -57,6 +57,22 @@ Static CIDRs need no geo database, so a CIDR-only Service works with
 `geoip.provider` unset. An invalid CIDR keeps the last-good CIDRs (none on
 first install) and still reconciles — it never silently opens the Service.
 
+### Denylisting (`denied-cidrs`)
+
+Block specific sources even when they are otherwise allowed:
+
+```yaml
+metadata:
+  annotations:
+    homelab-ingress.vranyes.com/allowed-geos: "US,CA"
+    homelab-ingress.vranyes.com/denied-cidrs: "203.0.113.0/24"
+```
+
+The deny set is evaluated **first**, before the allow-list: a denied source is
+dropped even if it is also in an allowed country or `allowed-cidrs` range.
+Same format and fail-closed last-good rules as `allowed-cidrs`; IPv6 is
+rejected.
+
 See [docs/GEOBLOCKING_PLAN.md](docs/GEOBLOCKING_PLAN.md) and
 [ADR 0006](docs/adr/0006-dbip-lite-provider.md).
 
@@ -79,6 +95,25 @@ either annotation takes effect live and starts a fresh bucket; removing the
 `rate-limit` annotation removes the limit.
 
 See [ADR 0007](docs/adr/0007-per-client-connection-rate-limiting.md).
+
+## Load-balancing policy
+
+Pick how connections spread across backends on a `LoadBalancer` Service:
+
+```yaml
+metadata:
+  annotations:
+    homelab-ingress.vranyes.com/lb-policy: "hash-source-ip" # or "round-robin" (default), "random"
+```
+
+- `round-robin` cycles connections across backends (the default; also used
+  when the annotation is absent).
+- `hash-source-ip` hashes the client IP so one source sticks to one backend.
+- `random` spreads each connection to a uniformly random backend.
+- An unknown value keeps the last-good policy (the default on first
+  install). `least-conn` is not supported — the stateless nftables data
+  plane cannot count active connections per backend (see
+  [ADR 0008](docs/adr/0008-denied-cidrs-and-lb-policy.md)).
 
 ## OpenWrt
 

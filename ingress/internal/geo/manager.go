@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/vranyes/homelab-ingress/ingress/internal/metrics"
 	"github.com/vranyes/homelab-ingress/ingress/internal/state"
 )
 
@@ -166,6 +167,13 @@ func (m *Manager) Reload() error {
 	// recording after the read could record the newer file while holding the
 	// older contents and miss the change entirely.
 	m.recordStat()
+	metrics.SetGeoDBAgeSeconds(m.dbAgeSeconds())
+	err := m.reload()
+	metrics.ObserveReconcile("geo", err)
+	return err
+}
+
+func (m *Manager) reload() error {
 	if err := m.src.Reload(); err != nil {
 		return err
 	}
@@ -281,4 +289,16 @@ func (m *Manager) recordStat() {
 	m.lastMod = info.ModTime()
 	m.lastSize = info.Size()
 	m.mu.Unlock()
+}
+
+// dbAgeSeconds returns the age of the database file as of the last reload,
+// or -1 when no reload has stat'ed the file yet.
+func (m *Manager) dbAgeSeconds() float64 {
+	m.mu.RLock()
+	lastMod := m.lastMod
+	m.mu.RUnlock()
+	if lastMod.IsZero() {
+		return -1
+	}
+	return time.Since(lastMod).Seconds()
 }

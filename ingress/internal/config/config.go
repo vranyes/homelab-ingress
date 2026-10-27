@@ -14,6 +14,9 @@ import (
 const (
 	DefaultGRPCListen = "0.0.0.0:50051"
 	DefaultWSListen   = "0.0.0.0:50052"
+	// DefaultMetricsListen is the Prometheus exposition address. An empty
+	// listen address disables the endpoint.
+	DefaultMetricsListen = ":9102"
 
 	// ProviderMaxMind downloads GeoLite2 Country from MaxMind (requires a
 	// license key).
@@ -38,9 +41,37 @@ type Config struct {
 	BaseInterface string           `yaml:"base_interface"`
 	GRPC          GRPC             `yaml:"grpc"`
 	WS            WS               `yaml:"ws"`
+	Metrics       Metrics          `yaml:"metrics"`
 	Auth          Auth             `yaml:"auth"`
 	Masquerade    []MasqueradeRule `yaml:"masquerade"`
 	GeoIP         GeoIP            `yaml:"geoip"`
+	Healthcheck   Healthcheck      `yaml:"healthcheck"`
+}
+
+// Healthcheck tunes active TCP probing of load-balancer backends (see
+// internal/health). The whole block is optional: unset fields select the
+// health package defaults (10s interval, 2s timeout, 2/2 thresholds).
+type Healthcheck struct {
+	Interval         time.Duration `yaml:"interval"`
+	Timeout          time.Duration `yaml:"timeout"`
+	FailThreshold    int           `yaml:"fail_threshold"`
+	SuccessThreshold int           `yaml:"success_threshold"`
+}
+
+// ApplyDefaults fills unset (non-positive) fields with the health defaults.
+func (h *Healthcheck) ApplyDefaults() {
+	if h.Interval <= 0 {
+		h.Interval = 10 * time.Second
+	}
+	if h.Timeout <= 0 {
+		h.Timeout = 2 * time.Second
+	}
+	if h.FailThreshold <= 0 {
+		h.FailThreshold = 2
+	}
+	if h.SuccessThreshold <= 0 {
+		h.SuccessThreshold = 2
+	}
 }
 
 // GeoIP holds the country-database settings. The whole block is optional: an
@@ -131,6 +162,13 @@ type WS struct {
 	Listen string `yaml:"listen"`
 }
 
+// Metrics holds the Prometheus exposition endpoint settings. An empty
+// Listen disables the endpoint; this is the zero value so a config that
+// omits the block keeps working without serving metrics.
+type Metrics struct {
+	Listen string `yaml:"listen"`
+}
+
 type MasqueradeRule struct {
 	InputDevice  string `yaml:"input_device"`
 	OutputDevice string `yaml:"output_device"`
@@ -156,6 +194,9 @@ func DefaultConfig() Config {
 		},
 		WS: WS{
 			Listen: DefaultWSListen,
+		},
+		Metrics: Metrics{
+			Listen: DefaultMetricsListen,
 		},
 	}
 }
@@ -188,7 +229,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.WS.Listen == "" {
 		cfg.WS.Listen = DefaultWSListen
 	}
+	if cfg.Metrics.Listen == "" {
+		cfg.Metrics.Listen = DefaultMetricsListen
+	}
 	cfg.GeoIP.ApplyDefaults("")
+	cfg.Healthcheck.ApplyDefaults()
 }
 
 func validate(cfg *Config) error {

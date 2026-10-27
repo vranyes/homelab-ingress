@@ -196,6 +196,8 @@ type CreateLoadBalancerRequest struct {
 	AllowedGeos   []string               `protobuf:"bytes,3,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"`    // ISO-3166 alpha-2 country codes
 	RateLimit     *RateLimit             `protobuf:"bytes,4,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`          // absent disables rate limiting
 	AllowedCidrs  []string               `protobuf:"bytes,5,rep,name=allowed_cidrs,json=allowedCidrs,proto3" json:"allowed_cidrs,omitempty"` // IPv4 CIDRs always allowed (e.g. LAN ranges)
+	DeniedCidrs   []string               `protobuf:"bytes,6,rep,name=denied_cidrs,json=deniedCidrs,proto3" json:"denied_cidrs,omitempty"`    // IPv4 CIDRs always denied (evaluated before the allow-list)
+	LbPolicy      string                 `protobuf:"bytes,7,opt,name=lb_policy,json=lbPolicy,proto3" json:"lb_policy,omitempty"`             // round-robin (default), hash-source-ip or random
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -265,6 +267,20 @@ func (x *CreateLoadBalancerRequest) GetAllowedCidrs() []string {
 	return nil
 }
 
+func (x *CreateLoadBalancerRequest) GetDeniedCidrs() []string {
+	if x != nil {
+		return x.DeniedCidrs
+	}
+	return nil
+}
+
+func (x *CreateLoadBalancerRequest) GetLbPolicy() string {
+	if x != nil {
+		return x.LbPolicy
+	}
+	return ""
+}
+
 type CreateLoadBalancerResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AssignedIp    string                 `protobuf:"bytes,1,opt,name=assigned_ip,json=assignedIp,proto3" json:"assigned_ip,omitempty"`
@@ -316,6 +332,8 @@ type UpdateLoadBalancerRequest struct {
 	AllowedGeos   []string               `protobuf:"bytes,3,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"`    // ISO-3166 alpha-2 country codes
 	RateLimit     *RateLimit             `protobuf:"bytes,4,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`          // absent clears the rate limit
 	AllowedCidrs  []string               `protobuf:"bytes,5,rep,name=allowed_cidrs,json=allowedCidrs,proto3" json:"allowed_cidrs,omitempty"` // IPv4 CIDRs always allowed (e.g. LAN ranges)
+	DeniedCidrs   []string               `protobuf:"bytes,6,rep,name=denied_cidrs,json=deniedCidrs,proto3" json:"denied_cidrs,omitempty"`    // IPv4 CIDRs always denied (evaluated before the allow-list)
+	LbPolicy      string                 `protobuf:"bytes,7,opt,name=lb_policy,json=lbPolicy,proto3" json:"lb_policy,omitempty"`             // round-robin (default), hash-source-ip or random
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -383,6 +401,20 @@ func (x *UpdateLoadBalancerRequest) GetAllowedCidrs() []string {
 		return x.AllowedCidrs
 	}
 	return nil
+}
+
+func (x *UpdateLoadBalancerRequest) GetDeniedCidrs() []string {
+	if x != nil {
+		return x.DeniedCidrs
+	}
+	return nil
+}
+
+func (x *UpdateLoadBalancerRequest) GetLbPolicy() string {
+	if x != nil {
+		return x.LbPolicy
+	}
+	return ""
 }
 
 type UpdateLoadBalancerResponse struct {
@@ -555,6 +587,8 @@ type GetLoadBalancerResponse struct {
 	AllowedGeos   []string               `protobuf:"bytes,6,rep,name=allowed_geos,json=allowedGeos,proto3" json:"allowed_geos,omitempty"`    // ISO-3166 alpha-2 country codes
 	RateLimit     *RateLimit             `protobuf:"bytes,7,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`          // absent means rate limiting is disabled
 	AllowedCidrs  []string               `protobuf:"bytes,8,rep,name=allowed_cidrs,json=allowedCidrs,proto3" json:"allowed_cidrs,omitempty"` // IPv4 CIDRs always allowed (e.g. LAN ranges)
+	DeniedCidrs   []string               `protobuf:"bytes,9,rep,name=denied_cidrs,json=deniedCidrs,proto3" json:"denied_cidrs,omitempty"`    // IPv4 CIDRs always denied (evaluated before the allow-list)
+	LbPolicy      string                 `protobuf:"bytes,10,opt,name=lb_policy,json=lbPolicy,proto3" json:"lb_policy,omitempty"`            // round-robin (default), hash-source-ip or random
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -643,6 +677,20 @@ func (x *GetLoadBalancerResponse) GetAllowedCidrs() []string {
 		return x.AllowedCidrs
 	}
 	return nil
+}
+
+func (x *GetLoadBalancerResponse) GetDeniedCidrs() []string {
+	if x != nil {
+		return x.DeniedCidrs
+	}
+	return nil
+}
+
+func (x *GetLoadBalancerResponse) GetLbPolicy() string {
+	if x != nil {
+		return x.LbPolicy
+	}
+	return ""
 }
 
 type ListLoadBalancersRequest struct {
@@ -835,7 +883,7 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x04addr\x18\x02 \x01(\tR\x04addr\"5\n" +
 	"\tRateLimit\x12\x12\n" +
 	"\x04rate\x18\x01 \x01(\x04R\x04rate\x12\x14\n" +
-	"\x05burst\x18\x02 \x01(\rR\x05burst\"\xe7\x01\n" +
+	"\x05burst\x18\x02 \x01(\rR\x05burst\"\xa7\x02\n" +
 	"\x19CreateLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12,\n" +
@@ -843,10 +891,12 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\fallowed_geos\x18\x03 \x03(\tR\vallowedGeos\x123\n" +
 	"\n" +
 	"rate_limit\x18\x04 \x01(\v2\x14.router.v1.RateLimitR\trateLimit\x12#\n" +
-	"\rallowed_cidrs\x18\x05 \x03(\tR\fallowedCidrs\"=\n" +
+	"\rallowed_cidrs\x18\x05 \x03(\tR\fallowedCidrs\x12!\n" +
+	"\fdenied_cidrs\x18\x06 \x03(\tR\vdeniedCidrs\x12\x1b\n" +
+	"\tlb_policy\x18\a \x01(\tR\blbPolicy\"=\n" +
 	"\x1aCreateLoadBalancerResponse\x12\x1f\n" +
 	"\vassigned_ip\x18\x01 \x01(\tR\n" +
-	"assignedIp\"\xe7\x01\n" +
+	"assignedIp\"\xa7\x02\n" +
 	"\x19UpdateLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12,\n" +
@@ -854,7 +904,9 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\fallowed_geos\x18\x03 \x03(\tR\vallowedGeos\x123\n" +
 	"\n" +
 	"rate_limit\x18\x04 \x01(\v2\x14.router.v1.RateLimitR\trateLimit\x12#\n" +
-	"\rallowed_cidrs\x18\x05 \x03(\tR\fallowedCidrs\"\x1c\n" +
+	"\rallowed_cidrs\x18\x05 \x03(\tR\fallowedCidrs\x12!\n" +
+	"\fdenied_cidrs\x18\x06 \x03(\tR\vdeniedCidrs\x12\x1b\n" +
+	"\tlb_policy\x18\a \x01(\tR\blbPolicy\"\x1c\n" +
 	"\x1aUpdateLoadBalancerResponse\"<\n" +
 	"\x19DeleteLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
@@ -862,7 +914,7 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\x1aDeleteLoadBalancerResponse\"9\n" +
 	"\x16GetLoadBalancerRequest\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
-	"serviceKey\"\xd2\x02\n" +
+	"serviceKey\"\x92\x03\n" +
 	"\x17GetLoadBalancerResponse\x12\x1f\n" +
 	"\vservice_key\x18\x01 \x01(\tR\n" +
 	"serviceKey\x12\x1f\n" +
@@ -874,7 +926,10 @@ const file_router_v1_router_proto_rawDesc = "" +
 	"\fallowed_geos\x18\x06 \x03(\tR\vallowedGeos\x123\n" +
 	"\n" +
 	"rate_limit\x18\a \x01(\v2\x14.router.v1.RateLimitR\trateLimit\x12#\n" +
-	"\rallowed_cidrs\x18\b \x03(\tR\fallowedCidrs\"\x1a\n" +
+	"\rallowed_cidrs\x18\b \x03(\tR\fallowedCidrs\x12!\n" +
+	"\fdenied_cidrs\x18\t \x03(\tR\vdeniedCidrs\x12\x1b\n" +
+	"\tlb_policy\x18\n" +
+	" \x01(\tR\blbPolicy\"\x1a\n" +
 	"\x18ListLoadBalancersRequest\"f\n" +
 	"\x19ListLoadBalancersResponse\x12I\n" +
 	"\x0eload_balancers\x18\x01 \x03(\v2\".router.v1.GetLoadBalancerResponseR\rloadBalancers\"\x0f\n" +

@@ -18,6 +18,12 @@ grpc:
 ws:
   listen: 0.0.0.0:50052
 
+# Prometheus exposition (optional). Served on /metrics by the daemon.
+# Defaults to :9102; unset the block to use the default. There is no way to
+# disable it from UCI — omit metrics_listen there to keep the default.
+# metrics:
+#   listen: 127.0.0.1:9102
+
 # Masquerade rules for same-L2 traffic between VLANs.
 # Each entry generates: iifname "input" oifname "output" ct status dnat masquerade
 # masquerade:

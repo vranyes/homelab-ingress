@@ -53,6 +53,10 @@ type stubRouter struct {
 	lastUpdateGeos      []string
 	lastCreateCIDRs     []string
 	lastUpdateCIDRs     []string
+	lastCreateDenied    []string
+	lastUpdateDenied    []string
+	lastCreatePolicy    string
+	lastUpdatePolicy    string
 	lastCreateRateLimit *router.RateLimit
 	lastUpdateRateLimit *router.RateLimit
 	updateErr           error
@@ -62,20 +66,24 @@ func newStubRouter(ip string) *stubRouter {
 	return &stubRouter{entries: map[string]*router.ServiceEntry{}, cannedIP: ip}
 }
 
-func (s *stubRouter) Create(_ context.Context, key string, ports []router.PortMapping, geos []string, cidrs []string, rateLimit *router.RateLimit) (*router.ServiceEntry, error) {
+func (s *stubRouter) Create(_ context.Context, key string, ports []router.PortMapping, geos []string, cidrs []string, denied []string, lbPolicy string, rateLimit *router.RateLimit) (*router.ServiceEntry, error) {
 	s.createCalls = append(s.createCalls, key)
 	s.lastCreateGeos = append([]string(nil), geos...)
 	s.lastCreateCIDRs = append([]string(nil), cidrs...)
+	s.lastCreateDenied = append([]string(nil), denied...)
+	s.lastCreatePolicy = lbPolicy
 	s.lastCreateRateLimit = rateLimit
-	e := &router.ServiceEntry{ServiceKey: key, AssignedIP: s.cannedIP, Ports: ports, AllowedGeos: geos, AllowedCIDRs: cidrs, RateLimit: rateLimit}
+	e := &router.ServiceEntry{ServiceKey: key, AssignedIP: s.cannedIP, Ports: ports, AllowedGeos: geos, AllowedCIDRs: cidrs, DeniedCIDRs: denied, LBPolicy: lbPolicy, RateLimit: rateLimit}
 	s.entries[key] = e
 	return e, nil
 }
 
-func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMapping, geos []string, cidrs []string, rateLimit *router.RateLimit) error {
+func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMapping, geos []string, cidrs []string, denied []string, lbPolicy string, rateLimit *router.RateLimit) error {
 	s.updateCalls = append(s.updateCalls, key)
 	s.lastUpdateGeos = append([]string(nil), geos...)
 	s.lastUpdateCIDRs = append([]string(nil), cidrs...)
+	s.lastUpdateDenied = append([]string(nil), denied...)
+	s.lastUpdatePolicy = lbPolicy
 	s.lastUpdateRateLimit = rateLimit
 	if s.updateErr != nil {
 		return s.updateErr
@@ -84,6 +92,8 @@ func (s *stubRouter) Update(_ context.Context, key string, ports []router.PortMa
 		e.Ports = ports
 		e.AllowedGeos = geos
 		e.AllowedCIDRs = cidrs
+		e.DeniedCIDRs = denied
+		e.LBPolicy = lbPolicy
 		e.RateLimit = rateLimit
 	}
 	return nil

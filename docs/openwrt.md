@@ -71,6 +71,7 @@ kubectl -n default rollout restart deployment/homelab-ingress-controller
 | `state_dir`               | — (`-state-dir` flag)     | `/etc/homelab-ingress` | Must persist. Move it only to another persistent path.      |
 | `grpc_listen`             | `grpc.listen`             | `0.0.0.0:50051`        | Omit to use the daemon default.                             |
 | `ws_listen`               | `ws.listen`               | `0.0.0.0:50052`        | Omit to use the daemon default.                             |
+| `metrics_listen`          | `metrics.listen`          | `:9102`                | Prometheus exposition on `/metrics`. Omit for the default.  |
 | `auth_issuer`             | `auth.issuer`             | *(required)*           |                                                             |
 | `auth_audience`           | `auth.audience`           | *(required)*           | Must match the audience the controller's projected token requests. |
 | `auth_allowed_subjects`   | `auth.allowed_subjects`   | *(required)*           | UCI `list`, one `sub` per entry.                            |
@@ -102,6 +103,27 @@ uci set homelab-ingress.config.geoip_cache_path='/etc/homelab-ingress/geo.mmdb' 
 uci commit homelab-ingress
 /etc/init.d/homelab-ingress restart
 ```
+
+## Metrics
+
+The daemon exposes Prometheus metrics on `/metrics` (default `:9102`,
+`metrics_listen` in UCI / `metrics.listen` in YAML). Scrape it with the
+usual node-exporter-style setup:
+
+```sh
+curl http://192.168.1.1:9102/metrics | grep ^homelab_ingress_
+```
+
+| Metric | Type (labels) | Meaning |
+| ------ | ------------- | ------- |
+| `homelab_ingress_services_total` | gauge | Services currently in daemon state. |
+| `homelab_ingress_nft_apply_errors_total` | counter (`op=add/remove/refresh`) | nftables apply failures by operation. |
+| `homelab_ingress_geo_db_age_seconds` | gauge | Country-database file age as of the last reload (`-1` = never reloaded). |
+| `homelab_ingress_dhcp_lease_expiry_seconds` | gauge (`service`) | Unix timestamp at which the service DHCP lease expires (`0` = unknown; series removed with the service). |
+| `homelab_ingress_reconcile_total` | counter (`manager=router/geo/dhcp`, `result=success/error`) | Reconcile loop outcomes. |
+
+Bind it to loopback (`metrics_listen '127.0.0.1:9102'`) if the metrics port
+should not be reachable from the LAN.
 
 ## Testing
 

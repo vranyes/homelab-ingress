@@ -263,6 +263,8 @@ type setStore interface {
 
 func geoSetName(sn string) string { return geoSetPrefix + sn }
 
+func denySetName(sn string) string { return denySetPrefix + sn }
+
 type ipRange struct {
 	first uint32
 	last  uint32
@@ -392,7 +394,18 @@ const geoSetChunkSize = 2000
 // buildGeoUnionSet creates or refreshes the per-service union set
 // geo_<safeName(serviceKey)>.
 func buildGeoUnionSet(ss setStore, table *nftables.Table, sn string, cidrs []*net.IPNet) (*nftables.Set, error) {
-	name := geoSetName(sn)
+	return buildIntervalSet(ss, table, geoSetName(sn), cidrs)
+}
+
+// buildDenySet creates or refreshes the per-service deny set
+// deny_<safeName(serviceKey)>. The name embeds the service hash so
+// RemoveRules (which deletes every set containing the service prefix) GCs it.
+func buildDenySet(ss setStore, table *nftables.Table, sn string, cidrs []*net.IPNet) (*nftables.Set, error) {
+	return buildIntervalSet(ss, table, denySetName(sn), cidrs)
+}
+
+// buildIntervalSet creates or refreshes the named interval set.
+func buildIntervalSet(ss setStore, table *nftables.Table, name string, cidrs []*net.IPNet) (*nftables.Set, error) {
 	chunks := geoSetChunks(cidrs, geoSetChunkSize)
 
 	existing, err := ss.GetSets(table)
@@ -504,4 +517,166 @@ func buildGeoSetDenyExprs(extIP net.IP, set *nftables.Set) []expr.Any {
 		&expr.Counter{},
 		&expr.Verdict{Kind: expr.VerdictDrop},
 	}
+}
+
+// buildDenySetDenyExprs returns:
+//
+//	ip daddr <extIP> ip saddr in @<denySet> counter drop
+//
+// Unlike the geo allow-list (inverted match), this is a plain membership
+// test: a listed source is dropped. It is installed first in the chain, so
+// denied sources never reach the allow-list, the rate limiter, or DNAT.
+func buildDenySetDenyExprs(extIP net.IP, set *nftables.Set) []expr.Any {
+	return []expr.Any{
+		&expr.Payload{
+			DestRegister: 0x1,
+			Base:         expr.PayloadBaseNetworkHeader,
+			Offset:       0x10, // IPv4 daddr
+			Len:          0x4,
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 0x1,
+			Data:     extIP.To4(),
+		},
+		&expr.Payload{
+			DestRegister: 0x1,
+			Base:         expr.PayloadBaseNetworkHeader,
+			Offset:       0x0c, // IPv4 saddr
+			Len:          0x4,
+		},
+		&expr.Lookup{
+			SourceRegister: 0x1,
+			SetName:        set.Name,
+			SetID:          set.ID,
+		},
+		&expr.Counter{},
+		&expr.Verdict{Kind: expr.VerdictDrop},
+	}
+}
+
+// LB policy names. The zero value ("") is the default: round-robin.
+const (
+	LBPolicyRoundRobin   = "round-robin"
+	LBPolicyHashSourceIP = "hash-source-ip"
+	LBPolicyRandom       = "random"
+)
+
+// normalizeLBPolicy maps the stored policy to its canonical form; empty
+// means the default round-robin.
+func normalizeLBPolicy(policy string) string {
+	if policy == "" {
+		return LBPolicyRoundRobin
+	}
+	return policy
+}
+
+// buildLBExprs dispatches to the per-policy DNAT pipeline. All policies share
+// the same numgen-index → backend map layout built by buildRoundRobinExprs;
+// only the index selection differs.
+func buildLBExprs(
+	c *nftables.Conn,
+	sname string,
+	table *nftables.Table,
+	extIP net.IP,
+	protocol string,
+	port uint16,
+	dst map[string]uint16,
+	policy string,
+) ([]expr.Any, error) {
+	switch normalizeLBPolicy(policy) {
+	case LBPolicyRoundRobin:
+		return buildRoundRobinExprs(c, sname, table, extIP, protocol, port, dst)
+	case LBPolicyRandom:
+		return buildRandomExprs(c, sname, table, extIP, protocol, port, dst)
+	case LBPolicyHashSourceIP:
+		return buildHashSourceExprs(c, sname, table, extIP, protocol, port, dst)
+	default:
+		return nil, fmt.Errorf("unsupported lb_policy %q (want %q, %q or %q)",
+			policy, LBPolicyRoundRobin, LBPolicyHashSourceIP, LBPolicyRandom)
+	}
+}
+
+// buildRandomExprs returns the same pipeline as buildRoundRobinExprs with the
+// incremental numgen replaced by a random one: each new connection picks a
+// uniformly random backend instead of cycling through them.
+func buildRandomExprs(
+	c *nftables.Conn,
+	sname string,
+	table *nftables.Table,
+	extIP net.IP,
+	protocol string,
+	port uint16,
+	dst map[string]uint16,
+) ([]expr.Any, error) {
+	exprs, err := buildRoundRobinExprs(c, sname, table, extIP, protocol, port, dst)
+	if err != nil {
+		return nil, err
+	}
+	idx := findNumgen(exprs)
+	if idx < 0 {
+		return nil, fmt.Errorf("round-robin pipeline has no numgen expression")
+	}
+	exprs[idx] = &expr.Numgen{
+		Register: 0x1,
+		Modulus:  uint32(len(dst)),
+		Type:     unix.NFT_NG_RANDOM,
+	}
+	return exprs, nil
+}
+
+// buildHashSourceExprs returns the same pipeline as buildRoundRobinExprs with
+// the incremental numgen replaced by a Jenkins hash over the source address:
+// all connections from one client IP land on the same backend (until the
+// backend set changes), without any per-connection state.
+func buildHashSourceExprs(
+	c *nftables.Conn,
+	sname string,
+	table *nftables.Table,
+	extIP net.IP,
+	protocol string,
+	port uint16,
+	dst map[string]uint16,
+) ([]expr.Any, error) {
+	exprs, err := buildRoundRobinExprs(c, sname, table, extIP, protocol, port, dst)
+	if err != nil {
+		return nil, err
+	}
+	idx := findNumgen(exprs)
+	if idx < 0 {
+		return nil, fmt.Errorf("round-robin pipeline has no numgen expression")
+	}
+	selector := []expr.Any{
+		// ip saddr → reg1
+		&expr.Payload{
+			DestRegister: 0x1,
+			Base:         expr.PayloadBaseNetworkHeader,
+			Offset:       0x0c, // IPv4 saddr
+			Len:          0x4,
+		},
+		// jhash over the 4 saddr bytes, mod N → reg1
+		&expr.Hash{
+			SourceRegister: 0x1,
+			DestRegister:   0x1,
+			Length:         0x4,
+			Modulus:        uint32(len(dst)),
+			Type:           expr.HashTypeJenkins,
+		},
+	}
+	out := make([]expr.Any, 0, len(exprs)+1)
+	out = append(out, exprs[:idx]...)
+	out = append(out, selector...)
+	out = append(out, exprs[idx+1:]...)
+	return out, nil
+}
+
+// findNumgen returns the index of the backend-index selection expression in
+// an LB pipeline, or -1 when there is none.
+func findNumgen(exprs []expr.Any) int {
+	for i, e := range exprs {
+		if _, ok := e.(*expr.Numgen); ok {
+			return i
+		}
+	}
+	return -1
 }
