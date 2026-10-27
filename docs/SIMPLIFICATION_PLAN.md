@@ -1,5 +1,13 @@
 # Ingress Service Simplification Plan
 
+> **Archived — no longer a living plan.** Parts of this document are stale
+> relative to the code (e.g. §1a proposes replacing SQLite with JSON, but
+> `ingress/internal/state/store.go` is still SQLite; the named symbols have
+> shifted line numbers; unit tests now exist for every package it lists as
+> untested, see `docs/ISSUES.md`). Kept for the Phase 2/3/4 reasoning, not as
+> a work list. Do not implement phases from here without re-verifying against
+> the current tree.
+
 ## Architecture Overview
 
 The ingress service (`ingress/`) is a Linux-only L4 load balancer daemon with 9

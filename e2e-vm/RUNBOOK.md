@@ -15,7 +15,7 @@ To re-run the suite (or a subset) by hand without rebooting the VM:
 E2E_KEEP_VM=1 make test-e2e   # host: leaves the VM running afterwards
 # inside the VM:
 cd /root/homelab-ingress/e2e
-go test -tags=e2e -count=1 -v -run 'TwoLB|Masq' ./...
+go test -tags=e2e -count=1 -v --ginkgo.focus='two-lb|masq' ./...
 ```
 
 ## Unit tests inside the VM (linux-only packages)
@@ -28,11 +28,9 @@ and need a Linux kernel to execute — macOS can only compile-check them
 make test-unit-vm   # host: boots VM if needed, ships ingress/, runs go test ./internal/... as root
 ```
 
-This stages a fresh copy of `ingress/` into the VM on every run, so no stale
-sources. The VM is left running for reuse by `make test-e2e`. `go test`
-downloads module deps on first run (VM has egress via NAT); subsequent runs
-reuse the module cache. In CI this runs automatically as the step before
-`make test-e2e`, sharing the same VM boot.
+Stages fresh `ingress/` each run; VM left running for `make test-e2e`. First
+run downloads module deps (NAT egress), later runs use the cache. In CI runs
+as the step before `make test-e2e` on the same VM.
 
 ## Log locations
 
@@ -59,9 +57,8 @@ The controller never wrote an IP. Check in order:
 2. **DHCP never acquired**: `tail /var/log/dnsmasq-ns.log` should show
    `DHCPDISCOVER`/`DHCPOFFER` per LB. If silent, verify the VEPA relay
    (next section).
-3. **Controller stuck**: `grep -i "error\|unauthenticated\|invalid" /var/log/hl-ingress/controller.log`.
-   `Unauthenticated` right after suite start points at the token file
-   (`/var/run/hl-ingress/token`) or a restarted ingress with a new CA.
+3. **Controller stuck**: `grep -i "error\|unauthenticated\|invalid" /var/log/hl-ingress/controller.log`
+   — see `Unauthenticated` below if right after suite start.
 
 ### Traffic dials `<nil>` or fails right after status appears
 
@@ -70,21 +67,17 @@ A stale `assigned_ip: "<nil>"` (pre-fix List bug) or a mid-convergence IP.
 IP looks wrong, wait one poll interval (5s) and re-check; the IP poller
 corrects it once DHCP lands.
 
-If traffic returns `connection refused` while the Service has a valid IP,
-check the transport rather than the IP: requests made from the host
-namespace are DNATed by kube-proxy (OUTPUT chain) and never touch the
-ingress rules. The suite sends traffic from `ns-server` for this reason.
-Reproduce by hand and watch the ingress counter advance:
+`connection refused` with a valid IP means wrong namespace, not wrong IP:
+host-namespace traffic hits kube-proxy, never the ingress rules. Always test
+from `ns-server` and watch the counter:
 
 ```bash
 ip netns exec ns-server curl -s http://<lbIP>/
-nft list chain ip homelab_ingress pre_<safe-service-key>
+nft list chain ip homelab_ingress pre_<sn>   # <sn> = safeName(serviceKey); see harness.LBChainName
 # the DNAT rule's packet counter must increase
 ```
 
-A zero counter alongside a 200 means the packet took a different path
-(kube-proxy); a zero counter with a refused connection means the ingress
-chain was not reached at all. Also confirm `EnsureVepaRelayUp` passed.
+Zero counter + 200 = kube-proxy path; zero + refused = ingress chain not reached.
 
 ### `EnsureVepaRelayUp` fails in BeforeSuite
 
@@ -113,9 +106,7 @@ found — restore `ca-key.pem` from backup.
 ```bash
 ip link show type macvlan              # one lb-* interface per LB Service
 nft --handle list table ip homelab_ingress   # per-service pre_* chains
-k3s ctr images ls | grep whoami        # backend image cached?
 kubectl -n hl-ingress-e2e get svc,deploy,pods -o wide
-kubectl -n hl-ingress-e2e describe pod <name>   # ImagePullBackOff details
 ```
 
 ## Starting over

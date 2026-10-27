@@ -1,19 +1,13 @@
 # homelab-ingress ingress
 
-The `ingress` module is a Linux system service that provides declarative, event-driven
-ingress routing.
-It receives service definitions via a gRPC API and automatically provisions macvlan
-interfaces, obtains IP addresses via DHCP, and configures nftables DNAT rules to
-forward traffic to backend targets. Optional per-Service country allow-lists are
-enforced at prerouting, before DNAT.
+The `ingress` module is a Linux service that provides declarative, event-driven
+ingress routing: clients write service definitions via gRPC to a central `State`
+store, which emits create/update/delete notifications; macvlan, DHCP, and router
+managers subscribe and reconcile system state (interfaces, addresses, nftables
+DNAT). Optional per-Service country allow-lists are enforced at prerouting,
+before DNAT.
 
 ## Architecture
-
-The ingress service uses an **event-driven declarative** model.
-A central `State` object holds the desired configuration and emits notifications
-whenever services are created, updated, or deleted.
-Independent modules subscribe to these notifications and reconcile the actual system
-state to match the desired state.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
@@ -25,12 +19,13 @@ state to match the desired state.
 ┌────────────────────────────────────────────────────────────────┐
 │                          State Store                           │
 │  ┌─────────────┐    ┌───────────────────────────────────────┐  │
-│  │  In-memory  │───▶│  LBNotification Channel (UpdateCh)    │  │
-│  │   State     │    │  CreateEvent / UpdateEvent / Delete   │  │
+│  │  In-memory  │───▶│  subscriber channels (Subscribe())    │  │
+│  │   State     │    │  CreateEvent / UpdateEvent /          │  │
+│  │             │    │  DeleteEvent                          │  │
 │  └─────────────┘    └───┬──────────────┬──────────────┬─────┘  │
 │         │               │              │              │        │
 │    Persist to           │              │              │        │
-│    disk (JSON)          ▼              ▼              ▼        │
+│  disk (SQLite)         ▼              ▼              ▼        │
 └───────────────────┬────────────────────────────────────────────┘
                     │
       ┌─────────────┼──────────────┬────────────────┐
@@ -38,51 +33,42 @@ state to match the desired state.
       ▼             ▼              ▼                │
 ┌──────────┐  ┌──────────┐  ┌──────────┐            │
 │ Macvlan  │  │  Router  │  │   DHCP   │            │
-│ Manager  │  │ Manager  │  │ Manager  │            │
-│          │  │          │  │          │            │
-│ Creates  │  │ nftables │  │ Obtains  │            │
-│ deletes  │  │  DNAT    │  │   IP     │            │
-│  macvlan │  │ forward  │  │  adds    │            │
-│interfaces│  │  rules   │  │  state   │────────────┘
-│ sets IPs │  │          │  │  update  │  triggers
-└──────────┘  └──────────┘  └──────────┘   new events
+│ Manager  │  │ Manager  │  │ Manager  │────────────┘
+└──────────┘  └──────────┘  └──────────┘   triggers
+                                           new events
 ```
 
 ### Event Flow
 
-1. **External client** (Kubernetes controller or CLI) calls the gRPC API to create/update/delete
-   a service
-2. **Service module** writes the change to `State`, which emits an `LBNotification`
-   on `UpdateCh`
-3. **All modules** receive the notification and act: - **Macvlan Manager**: creates/deletes
-   interfaces, sets IP addresses - **DHCP Manager**: starts/stops DHCP clients;
-   when an IP is acquired it updates State, triggering a new event cycle - **Router
-   Manager**: adds/removes nftables DNAT and forward rules
-4. Each module also runs a **periodic reconciliation loop** to correct drift
+An external client (controller or CLI) calls the gRPC API; the Service module
+writes to `State`, which notifies all subscribers. Macvlan creates/deletes
+interfaces and sets IPs, DHCP starts/stops clients (an acquired IP is written
+back to `State`, triggering a new event cycle), and Router adds/removes
+nftables rules. Each module also reconciles periodically to correct drift
+(macvlan and DHCP every 30s; router after 5 event-free minutes).
 
 ## Modules
 
 ### State (`internal/state/`)
 
-The central coordination layer.
-Maintains the desired state of all load balancer services and acts as an event bus.
+Central coordination layer: holds desired state for all services and acts as
+the event bus. All modules share one `State` instance; all mutations flow
+through `UpdateService()` / `DeleteService()`, which emit events to all
+modules.
 
 **Key types:**
 
-- `State` — holds the service map, base interface, and the notification channel
-  (`UpdateCh`)
+- `State` — holds the service map, base interface, and the subscriber channels
+  (see `Subscribe()`)
 - `LBService` — represents a single load balancer rule with interface, MAC, IP,
   and port targets
 - `LBNotification` — emitted on create, update, or delete events
 
 **Key functions:**
 
-- `UpdateService(st, svc)` — upserts a service and emits CreateEvent or UpdateEvent
-- `DeleteService(st, key)` — removes a service and emits DeleteEvent
-- `Store.Load()` / `Store.Save()` — persist state to disk as JSON (atomic write)
-
-All modules read from and write to the same `State` instance.
-Mutations to State are the **only** way to trigger cross-module coordination.
+- `(*State).UpdateService(svc)` — upserts a service and emits CreateEvent or UpdateEvent
+- `(*State).DeleteService(key)` — removes a service and emits DeleteEvent
+- `Store` — persists services and DHCP leases to SQLite (`state.db`)
 
 ### Router (`internal/router/`)
 
@@ -103,19 +89,22 @@ type Implementor interface {
 
 - `Run(notif)` — subscribes to state notifications; adds rules on Create/Update,
   removes on Delete
-- `Reconcile(st)` — compares actual nftables rules against desired state, adds missing
-  rules and removes extraneous ones
+- `Reconcile()` — re-applies rules for every known service (idempotent re-add).
+  Note: no GC of unknown chains — stale chains are removed only via Delete events.
+- Reconciles after 5 event-free minutes (see Event Flow)
 - `RefreshGeoSets(svcCIDRs)` — flushes and repopulates the per-service geo union sets
-  after a country-database reload (no chain rebuild)
-- Reconciles every 5 minutes
+  after a country-database reload; in place, no chain rebuild, no restart
 
 **nftables implementation** (`internal/router/nftables/`):
 
-- Creates a dedicated table (`homelab-ingress`) with per-service chains
-- **Ingress chain** (prerouting, NAT): matches on destination IP/port and applies
+- Creates a dedicated table (`homelab_ingress`) with per-service `pre_<sn>` chains
+  (`sn` is the `safeName` hash of the service key)
+- **Ingress chain** (`pre_<sn>`, prerouting, NAT): matches on destination IP/port and applies
   DNAT
-- **Forward chain** (forward, filter): accepts post-DNAT traffic to pod IPs/ports
-- **Postrouting chain**: masquerades outbound traffic
+- **Forward chain** (forward, filter): accepts `ct state established,related` and
+  `ct status dnat` traffic only — no per-IP/port matches
+- **Postrouting chain**: masquerades outbound traffic, but only for pairs
+  configured via `WithMasquerade` / `masquerade` in the config (default: none)
 - Supports single-destination DNAT and round-robin load balancing via nftables sets/maps
 - Per-service, per-source-IP new-connection rate limiting: a dynamic set
   (`rl_<sn>_<rate>_<burst>`) holds one token bucket per client IP, and a
@@ -137,18 +126,11 @@ DB-IP data is CC BY 4.0; the daemon logs the required attribution at startup.
 
 `geo.Manager` watches the database file (fsnotify plus a 30s poll fallback),
 rebuilds the per-service country→CIDR map from State, and invokes `OnRebuild`,
-which the nftables manager implements as `RefreshGeoSets`. Sets are updated in
-place, so a database refresh needs neither a restart nor a chain rebuild.
+which the nftables manager implements as `RefreshGeoSets`.
 
-Country unions are large (US+CA is tens of thousands of ranges), and a single
-netlink message carrying the whole set exceeds the socket limit with
-`sendmsg: message too long` (EMSGSIZE). Set population is therefore split into
-2,000-element chunks, each flushed separately (`geoSetChunkSize`); chunks are
-cut on range boundaries (`geoSetChunks`) so an interval start and its
-`IntervalEnd` always travel in the same message. nftables interval ends are
-exclusive: a single address `k` is `[k, k+1)` and a range `[first,last]` is
-`[first,last+1)`. The encoding and chunking are covered by real-kernel unit
-tests, including a range that straddles the chunk boundary.
+Set population is chunked into 2,000-element batches (unions exceed the
+netlink `EMSGSIZE` limit), cut on range boundaries. Interval ends are
+exclusive (`k` → `[k,k+1)`), covered by real-kernel unit tests.
 
 With a non-empty allow-list, the per-LB chain starts with:
 
@@ -162,69 +144,27 @@ so it fails closed.
 
 ### Macvlan (`internal/macvlan/`)
 
-Manages macvlan network interfaces on the load balancer host.
-Creates, configures, and deletes interfaces but does **not** determine which IP
-addresses to use — that responsibility belongs to the DHCP module and the state.
+Manages macvlan network interfaces: creates, configures, deletes. It does
+**not** choose addresses — those come from DHCP via `State`.
 
-**Methods on `NetlinkManager`:**
+`NetlinkManager`: `Create` / `Delete` / `Exists` / `GetMAC` / `SetUp` /
+`SetMAC` / `SetIP`.
 
-```go
-func (m *NetlinkManager) Create(iface, parent string, mac net.HardwareAddr) error
-func (m *NetlinkManager) Delete(iface string) error
-func (m *NetlinkManager) Exists(iface string) bool
-func (m *NetlinkManager) GetMAC(iface string) (net.HardwareAddr, error)
-func (m *NetlinkManager) SetUp(iface string) error
-func (m *NetlinkManager) SetMAC(iface string, mac net.HardwareAddr) error
-func (m *NetlinkManager) SetIP(iface string, ip net.IP, subnetMask net.IPMask) error
-```
+| Event | Action |
+|---|---|
+| `CreateEvent` | Generate locally-administered unicast MAC, create VEPA interface on `st.BaseIface`, bring up, write interface + MAC back to `State` (emits `UpdateEvent`, which starts DHCP). Creation failure logs and touches no state. |
+| `UpdateEvent` | Set IP from `SourceAddress`/`SourceMask` (replace semantics); `SetMAC` (no-op if correct). |
+| `DeleteEvent` | Delete the interface (name recomputed via `InterfaceName()`). |
 
-**Manager behavior:**
+Plus 30s reconciliation: recreates missing interfaces and re-applies IP/MAC,
+so restored state converges without waiting for a gRPC mutation.
 
-- `Run(svc)` — subscribes to state notifications via the `LBNotification`
-  channel:
-  - **CreateEvent**: generates a MAC (locally-administered unicast), creates
-    the macvlan interface in **VEPA mode** on the parent interface
-    (`st.BaseIface`), brings it up, then **optimistically** writes the interface
-    name and MAC back to State (even if creation failed, other modules are
-    triggered).
-  - **UpdateEvent**: sets the IP address from `SourceAddress`/`SourceMask`
-    using **replace semantics** (removes all existing IPs first), and sets the
-    MAC address via `SetMAC` (no-op if already correct).
-  - **DeleteEvent**: removes the interface; looks up the interface name from
-    State (`GetInterfaceName()`) rather than recomputing it from the service key.
-- **No periodic reconciliation** — the macvlan module is purely event-driven
-  (unlike the DHCP module, which reconciles every 30s, and the Router module,
-  which reconciles every 5 minutes).
-- Restoring state from persistence on startup does **not** automatically
-  recreate macvlan interfaces — only gRPC mutations flow through the event
-  channel.
-
-**Design details:**
-
-- **VEPA mode** (`MACVLAN_MODE_VEPA`): all frames from the macvlan interface are
-  forwarded through the physical switch.
-  Requires hairpin mode on the upstream switch port for inter-macvlan communication
-  on the same host.
-- **Locally-administered MACs**: `GenerateMAC()` uses `crypto/rand` then sets `mac[0]
-  = (mac[0] & 0xFE) | 0x02`, ensuring unicast (bit 0 = 0) and locally administered
-  (bit 1 = 1), avoiding OUI conflicts.
-- **Deterministic interface names**: `InterfaceName()` replaces `/` with `-`, computes
-  a SHA1 hash of the full service key, and formats as `lb-<short>-<hash>` (max 15
-  chars, Linux `IFNAMSIZ` limit of 16 bytes including NUL).
-  The short portion is truncated to fit, stripping trailing hyphens.
-- **Idempotent operations**: `Delete()` succeeds if the interface doesn't exist;
-  `SetMAC()` is a no-op when the MAC already matches; `SetIP()` removes stale addresses
-  before adding the new one — no-ops when the address is correct.
-- **Self-triggered events**: the `CreateEvent` handler calls `st.UpdateService()`,
-  which emits an `UpdateEvent` back onto the same channel.
-  This event is a no-op for the macvlan module (MAC already set, no IP yet) but
-  triggers the DHCP module to start.
+Details: names are `lb-<short>-<hash>` (SHA1, max 15 chars); operations are
+idempotent.
 
 ### DHCP (`internal/dhcp/`)
 
-Obtains IP addresses for interfaces via DHCP.
-Does not create interfaces — it assumes the macvlan module has already provisioned
-them.
+Obtains IP addresses for macvlan-provisioned interfaces via DHCP.
 
 **Interface:**
 
@@ -234,25 +174,22 @@ type Client interface {
     Stop()
     CurrentIP() net.IP
     IsAcquired() bool
+    LeaseInfo() *LeaseInfo
 }
 ```
 
 **Manager behavior:**
 
 - Maintains a map of interface → DHCP client
-- `Run(svc)` — subscribes to state notifications: - **CreateEvent/UpdateEvent**:
-  creates a new DHCP client for the interface (using the MAC from State) - **DeleteEvent**:
-  stops and removes the DHCP client
-- Each client runs a renewal loop (T1 = half lease time)
-- When an IP is acquired or changes, an `IPChangeFunc` callback is invoked
-- The callback (configured in `main.go`) updates State with the new `SourceAddress`,
-  which triggers a new notification cycle that causes the macvlan module to set
-  the IP and the router module to update nftables rules
+- `Run(svc)` — on Create/Update starts a DHCP client for the interface (MAC
+  from State); on Delete stops/removes it
+- Each client runs a renewal loop (T1 = half the advertised lease, minimum 30s)
+- `onIPChange` writes `SourceAddress` (+ mask from ACK/restored lease) to State →
+  `UpdateEvent` → macvlan sets IP, router updates rules
 
 ### Service (`internal/service/`)
 
-gRPC server that exposes the `RouterService` API.
-This is the external interface for configuring load balancer rules.
+External gRPC interface (`RouterService`) for configuring load balancer rules.
 
 **RPCs:**
 
@@ -262,45 +199,29 @@ This is the external interface for configuring load balancer rules.
 - `DeleteLoadBalancer` — removes a service
 - `GetLoadBalancer` / `ListLoadBalancers` — query current state, including
   `allowed_geos`
-- `Health` — health check with active macvlan count
-
-All mutations flow through `state.UpdateService()` / `state.DeleteService()`, which
-emit events to all modules.
+- `Health` — health check with active macvlan count (`Healthy`, `ActiveMacvlans`).
+  The proto also defines `BaseInterface`, but the daemon currently leaves it
+  empty.
 
 ## Lifecycle Example
 
-When a client calls `CreateLoadBalancer("my-svc", [{tcp:80 → 10.0.0.1:8080}])`:
-
-1. **Service** creates an `LBService` entry and calls `state.UpdateService()`
-2. **State** emits a `CreateEvent` notification on `UpdateCh`
-3. **Macvlan Manager** receives the event:
-   - Generates a MAC address
-   - Creates macvlan interface `lb-my-sv-<hash>` on the parent interface
-   - Brings the interface up
-   - Writes interface name and MAC back to State (triggering an UpdateEvent)
-4. **DHCP Manager** receives the event:
-   - Creates a DHCP client for the new interface
-   - Starts DHCP discovery
-5. When DHCP acquires an IP:
-   - The `IPChangeFunc` callback updates State with `SourceAddress`
-   - State emits an `UpdateEvent`
-6. **Macvlan Manager** receives the update:
-   - Sets the IP address on the interface
-7. **Router Manager** receives the update:
-   - Creates nftables DNAT rules for `SourceAddress:80 → 10.0.0.1:8080`
+`CreateLoadBalancer` → `State` update + `CreateEvent` → macvlan creates the
+interface → DHCP acquires the IP → `State` update → macvlan sets the IP,
+router writes DNAT rules.
 
 ## Startup Sequence
 
 In `cmd/ingress/main.go`:
 
-1. Load configuration and state (or create new state)
-2. Start Macvlan Manager goroutine (subscribes to `UpdateCh`)
-3. Start DHCP Manager goroutine (subscribes to `UpdateCh`)
-4. If `geoip.provider` is set: create the `geoip` manager, start its refresh
+1. Load configuration and state (SQLite `state.db`), reusing or creating the CA
+2. Start Macvlan, DHCP, and Router manager goroutines (each subscribes to `State`)
+3. If `geoip.provider` is set: create the `geoip` manager, start its refresh
    goroutine, start the `geo` watcher, and wire `OnRebuild` to
    `nftables.RefreshGeoSets`
-5. Start gRPC server (Service module)
-6. On shutdown: graceful gRPC stop, DHCP clients stopped (releasing leases)
+4. Start the always-TLS gRPC server with OIDC interceptors, plus the optional
+   WebSocket event server
+5. On shutdown: graceful gRPC stop, stop clients, delete interfaces, drop the
+   nftables table
 
 ## State Schema
 
@@ -312,11 +233,12 @@ In `cmd/ingress/main.go`:
     "my-service": {
       "service_name": "my-service",
       "interface": "lb-my-se-abc123",
-      "macaddr": "02:ab:cd:ef:01:23",
+      "macaddr": "AgEEAQIDBAU=",
       "dhcp_acquired": true,
       "source_address": "192.168.1.100",
-      "source_mask": "ffffff00",
+      "source_mask": "////AA==",
       "allowed_geos": ["US", "CA"],
+      "rate_limit": { "rate": 5, "burst": 10 },
       "targets": [
         {
           "protocol": "tcp",
@@ -331,15 +253,19 @@ In `cmd/ingress/main.go`:
 }
 ```
 
+(`macaddr`/`source_mask` serialise as base64; services live in the `services`
+table of `state.db`, leases in `dhcp_leases`.)
+
 ## Project Layout
 
 ```bash
 ingress/
 ├── cmd/
 │   ├── ingress/    # Main binary entrypoint
-│   └── cli/             # CLI tool
+│   └── hictl/      # CLI tool
 ├── internal/
 │   ├── auth/            # gRPC authentication interceptors
+│   ├── certgen/         # CA + leaf certificate management
 │   ├── config/          # Configuration loading
 │   ├── dhcp/            # DHCP client management
 │   ├── geo/             # database watcher + per-service CIDR rebuild
@@ -348,16 +274,15 @@ ingress/
 │   ├── router/          # Router manager interface + nftables implementation
 │   │   └── nftables/    # nftables rule management
 │   ├── service/         # gRPC service implementation
-│   └── state/           # Central state store and event bus
-├── pkg/api/router/v1/   # Generated protobuf/gRPC code
+│   ├── state/           # Central state store and event bus
+│   └── ws/              # WebSocket event server
+├── pkg/api/router/v1/  # Generated protobuf/gRPC code (source: proto/router/v1/)
 ```
 
 ## Requirements
 
-- Linux host with kernel networking support
-- `nftables` kernel module loaded
+- Linux host with nftables kernel support (//go:build linux)
 - Root privileges (netlink, interface creation, nftables)
-- Built with `//go:build linux` tag
 
 ## Quick Start
 
@@ -372,8 +297,5 @@ sudo ./ingress --config /etc/homelab-ingress/config.yaml
 ## Testing
 
 ```bash
-go test ./...
+go test ./...   # linux-only packages need a Linux kernel (see e2e-vm/RUNBOOK.md)
 ```
-
-The nftables and macvlan packages use `//go:build linux` build tags.
-Tests that require kernel access are separated from unit tests that use stub implementations.

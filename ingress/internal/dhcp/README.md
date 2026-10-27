@@ -5,58 +5,54 @@ the Macvlan Manager has already provisioned.
 
 ## Architecture
 
-Two files with a clear separation of concerns:
+Three files:
 
 - **`client_interface.go`** — Orchestrator (`Manager`).
   Subscribes to state notifications, creates/stops per-interface DHCP clients, and
   runs a periodic reconciliation loop.
-  Writes acquired IPs back into `State.SourceAddress` via the `onIPChange` callback,
-  which triggers a new event cycle so the Macvlan and Router managers react.
 
 - **`real.go`** — Concrete DHCP client (`realClient`) using the `github.com/insomniacslk/dhcp`
   library.
-  Implements the `Client` interface (`Start`, `Stop`, `CurrentIP`, `IsAcquired`).
+  Implements the `Client` interface (`Start`, `Stop`, `CurrentIP`, `IsAcquired`,
+  `LeaseInfo()`).
   Performs DHCP discover/request, handles renewals in a loop, and sends a DHCP release
   on shutdown.
 
-Both files carry `//go:build linux` — the DHCP module only compiles on Linux.
+- **`lease.go`** — `LeaseInfo` persistence helpers (portable, no build tag).
+  Restored leases let a client skip discovery after restart.
+
+Linux-only (`//go:build linux` on `client_interface.go`, `real.go`).
 
 ## Manager (`client_interface.go`)
 
 ### Internal state
 
 - `clients map[string]Client` — interface name → DHCP client
-- `ifaceToService map[string]string` — reverse mapping: interface name → service
-  key (used by `onIPChange` to look up which service to update when an IP arrives)
+- `ifaceToService map[string]string` — interface name → service key
 
 ### Event handling (`Manager.Run`)
 
-Subscribes to `LBNotification` events from the shared `State.UpdateCh`:
+Subscribes to `LBNotification` events from `State`:
 
-| Event                         | Handler        | Behavior                                                                                                                                                                                                                                                   |
-|-------------------------------|----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CreateEvent` / `UpdateEvent` | `handleUpsert` | Creates a new `realClient` if none exists for that interface (requires non-empty interface name and non-nil MAC). If the interface name changed for a service, removes the old client first. `ensureAndStart` is idempotent — safe to call multiple times. |
-| `DeleteEvent`                 | `handleDelete` | Stops the DHCP client and removes it. If the notification carries no interface name, falls back to the `ifaceToService` reverse mapping.                                                                                                                   |
+| Event                         | Handler        | Behavior                                                        |
+|-------------------------------|----------------|-----------------------------------------------------------------|
+| `CreateEvent` / `UpdateEvent` | `handleUpsert` | Creates client if missing (requires interface name + MAC); replaces stale client on interface rename. |
+| `DeleteEvent`                 | `handleDelete` | Stops and removes client; falls back to `ifaceToService` if name missing. |
 
 ### Reconciliation loop
 
 Runs every **30 seconds** via `Manager.reconcile()`:
 
-- Snapshots the desired services from `State.Clone()`
-- Creates any DHCP clients for services that have a valid interface name and MAC
-  but no active client
-- Removes any DHCP clients whose interface no longer exists in state
-
-This corrects drift after restarts or transient failures.
+- Creates missing clients with valid interface + MAC
+- Removes clients with no matching service
 
 ### IP change feedback (`onIPChange`)
 
-When a `realClient` acquires or changes its IP, the callback:
-
-1. Looks up the service key via `serviceKeyForInterface`
-2. Clones the service, sets `SourceAddress` to the new IP and `SourceMask` to `/32`
-3. Sets `DHCPAcquired = true`
-4. Calls `st.UpdateService(clone)` — this emits a new `UpdateEvent`
+Looks up the service, sets `SourceAddress`/`SourceMask`/`DHCPAcquired=true`, and
+calls `st.UpdateService()` to emit an `UpdateEvent` — but only when the IP or
+mask actually changed (change-guard). The lease is persisted unconditionally
+(`persistLease`), so a restart restores it. The mask comes from the DHCP ACK
+(or the restored lease).
 
 This is how the DHCP module feeds back into the system: the new event triggers the
 Macvlan Manager to set the IP on the interface and the Router Manager to create
@@ -71,7 +67,7 @@ Start()
        │    ├─ success → enter renewal loop
        │    └─ failure  → wait 5s, retry
        └─ renewal loop
-            ├─ wait T1 = leaseTime/2 (min 30s, default 30min)
+            ├─ wait T1 = leaseTime/2 (min 30s)
             ├─ dhcpRenew()   ← 30s timeout, 1 retry
             │    ├─ success → continue renewal loop
             │    └─ failure  → break to full discover/request cycle
@@ -83,35 +79,22 @@ Stop()
 
 Key details:
 
-- **Initial request**: `newDHCPConn` creates `nclient4.Client` with configurable
-  timeout and retries.
-  The request uses the interface's MAC address from state, so the DHCP server sees
-  the same MAC as the macvlan interface.
-- **Renewal interval**: Computed as T1 = `IPAddressLeaseTime / 2` from the DHCP
-  ACK.
-  Falls back to 60 minutes if the server doesn't advertise a lease time.
-  Never goes below 30 seconds.
-- **Lease release**: `Stop()` blocks until the goroutine exits, then sends a DHCP
-  RELEASE message.
-  If the release fails, the error is logged but does not block shutdown.
-- **Edge case — no ACK**: Both `dhcpRequest` and `dhcpRenew` verify `resp.ACK` is
-  non-nil before using the assigned IP.
+- **MAC**: the wire request uses the kernel interface address via
+  `nclient4.New(iface, ...)`; the stored MAC is only used for logging.
+- **Release**: `Stop()` waits for the goroutine, then sends DHCP RELEASE (failure
+  is logged, never blocks shutdown).
 
 ## Shutdown sequence (from `main.go`)
 
 ```go
-defer dhcpMgr.Stop()      // closes the done channel → Run() exits
-defer dhcpMgr.StopAll()   // stops every client (cancels context, releases leases)
+grpcServer.GracefulStop()
+dhcpMgr.Stop()      // event loop (also deferred)
+dhcpMgr.StopAll()   // all clients + RELEASE (also deferred)
+// ... 2s drain for RELEASE frames, then linkMgr.DeleteAll(), ParentSetDown(), iml.Cleanup()
 ```
-
-`Stop()` signals the event loop to exit.
-`StopAll()` iterates all active clients and cancels their contexts, then sends DHCP
-releases — this is critical for a clean shutdown where the DHCP server can reclaim
-the addresses immediately.
 
 ## Security & constraints
 
 - Requires **root** privileges (raw socket access for DHCP packets)
-- Bound to the macvlan interface's MAC address — the DHCP server must be on the
-  same L2 network
-- No test coverage currently exists for the DHCP module
+- DHCP server must be on same L2 network
+- Unit-tested via fake `Client`; raw-socket paths need Linux (`make test-unit-vm`)

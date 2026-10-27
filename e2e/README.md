@@ -5,84 +5,66 @@ oidc-mock helper binary.
 
 ## What it does
 
-The suite exercises both halves of the homelab-ingress stack in a real multi-process
+The suite exercises the full homelab-ingress stack in a multi-process
 topology inside a single lima VM (Alpine `linux-virt`):
 
 - **ingress** (`ingress/cmd/ingress`) — the data-plane daemon that creates macvlan
   interfaces, gets DHCP leases via dnsmasq, and installs nftables DNAT rules.
-  Spawned as a child process by the test harness.
 - **controller** (`controller/cmd/controller`) — the Kubernetes controller that
   watches `Service` objects of type `LoadBalancer` with `loadBalancerClass: homelab-ingress`.
-  Spawned as a child process by the test harness.
   Talks to the k3s API server via `/etc/rancher/k3s/k3s.yaml`.
-- **oidc-mock** (`e2e/cmd/oidc-mock`) — a tiny mock OIDC provider used by the ingress's
-  `auth.NewTokenVerifier`.
+- **oidc-mock** (`e2e/cmd/oidc-mock`) — a mock OIDC provider used by the ingress's
+  `auth.NewTokenVerifier`, on `127.0.0.1:8080`.
   Serves `.well-known/openid-configuration`, JWKS, and a `/token` endpoint that
   mints RS256 JWTs signed with a baked-in RSA key.
-  Spawned as a child process by the test harness on `127.0.0.1:8080`.
-- **traefik/whoami** — replaced by **`identicon`** (`e2e/cmd/identicon`), a tiny
-  Go HTTP echo server that returns the pod hostname in the response body. When
-  `backend.mode: fake` in the ingress config YAML the ingress daemon itself starts
-  an identicon process as a child; for cluster-backed backends the identicon image
-  needs to be loaded into k3s (see Known Issues below).
+- **traefik/whoami** — the cluster-backed backend: `DeployBackend`
+  (`harness/backends.go` → `DeployIdenticon` in `harness/k8s.go`) creates a
+  k3s Deployment.
 
-The test harness spawns the three binaries in dependency order (oidc → ingress →
-controller) during `BeforeSuite` and terminates them in reverse order during
-`AfterSuite`. Each process is sent SIGTERM followed by SIGKILL after a 5-second
-grace period. The k3s cluster runs in the VM and schedules whoami pods.
-The controller reads EndpointSlices from k3s and drives the ingress via gRPC.
-The test binary itself runs in-VM as root (via `limactl exec ... go test -tags=e2e`);
-it creates Service objects in k3s, mutates the OIDC token file, fires HTTP traffic
-at allocated LB IPs, and inspects nftables and log files for assertions.
+The harness spawns oidc-mock → ingress → controller in `BeforeSuite`
+(SIGTERM then SIGKILL after a 5s grace period in `AfterSuite`). The k3s cluster
+runs in the VM and schedules whoami pods. The controller reads EndpointSlices
+from k3s and drives the ingress via gRPC. The test binary itself runs in-VM as
+root (via `limactl shell ... go test -tags=e2e`); it creates Service objects in
+k3s, mutates the OIDC token file, fires HTTP traffic at allocated LB IPs, and
+inspects nftables and log files for assertions.
 
 ## Scenario matrix
 
 | File                             | # LBs | Targets/LB | Asserts                                                                                                          |
 |----------------------------------|-------|------------|------------------------------------------------------------------------------------------------------------------|
-| `zero_lb_test.go`                | 0     | -          | `Health.active_macvlans == 0`; no per-LB nftables chains; controller log clean                                   |
+| `zero_lb_test.go`                | 0     | -          | `Health.active_macvlans == 0`; no per-LB nftables chains (`ERROR`-free controller log is asserted in `BeforeSuite`) |
 | `one_lb_test.go` (DescribeTable) | 1     | 0          | no macvlan provisioned (controller requeues on zero ready endpoints); no status IP; no nftables chains           |
 |                                  | 1     | 1          | status IP present; backend pods Ready; 50 fresh-conn GETs all return one backend ID                              |
 |                                  | 1     | 3          | status IP present; backend pods Ready; 50 fresh-conn GETs return all 3 backends within ±25% uniform              |
 | `two_lb_test.go`                 | 2     | 1 + 3      | distinct LB IPs; per-LB isolation; lb1 hits 1, lb2 hits 3; both per-service nftables chains exist                |
 | `two_lb_test.go`                 | 2     | 1 + 1      | same external port (80) on both LBs; no cross-talk; both per-service nftables chains exist                       |
 | `churn_test.go`                  | 1→0   | 1          | macvlan gone; nftables chain gone; Service finalizer removed                                                     |
-| `churn_test.go`                  | 0→1   | 1          | recreate within 10s; reconverges within 30s                                                                      |
-| `oidc_reject_test.go`            | 1     | 1          | mutated token (aud=bogus) rejected; controller log shows Unauthenticated; no Service status IP set               |
+| `churn_test.go`                  | 0→1   | 1          | recreate reconverges within 30s (traffic flows)                                                                  |
+| `oidc_reject_test.go`            | 1     | 0          | mutated token (aud=bogus) rejected; controller log shows Unauthenticated; no Service status IP set (no backend)  |
 | `grpc_list_test.go`              | 1     | 1          | `Get` and `List` report the same converged IP; no entry ever contains `"<nil>"`                                  |
+| `dhcp_lease_test.go`             | 1     | 1          | dhcp black-box: acquisition/release (renewal timers and daemon-restart persist-restore are out of scope)         |
+| `two_lb_masq_test.go`            | 1     | 2          | two-lb-masq counter validation                                               |
 | `geo_block_test.go`              | 1–2   | 1          | geo deny precedes DNAT; US allowed/EU dropped; annotation flip; DB hot-reload; per-service sets                  |
-| `rate_limit_test.go`             | 1–2   | 1          | per-client new-conn limit; bucket refill; live rate change rotates the set; removal; client isolation            |
+| `rate_limit_test.go`             | 1     | 1          | per-client new-conn limit; bucket refill; live rate change rotates the set; removal; client isolation |
 
-Traffic is always generated **inside the `ns-server` VEPA peer namespace**
-(`collectIDs` → `CollectBackendIDsFromNS`), never from the test process's
-own namespace. The LB IPs live on macvlan interfaces in the host namespace,
-so a request made by the test process is delivered locally and DNATed by
-kube-proxy's OUTPUT chain — it never reaches the ingress daemon's prerouting
-rules, and assertions built on it stay green even when those rules are
-broken. Requests from `ns-server` arrive over the bridge and do traverse the
-ingress chains.
+### Traffic generation
+
+All traffic originates in `ns-server` via `CollectBackendIDsFromNS` with fresh
+connections (no keep-alive, else round-robin under-counts). Host-namespace
+traffic would bypass the ingress chains via kube-proxy's OUTPUT chain, so
+assertions built on it stay green even when ingress rules are broken.
+Rate-limit specs use `AttemptParallelFromNS` with range assertions
+(`1..burst+2` successes for a flood): the token bucket refills while the
+processes start.
 
 Geo-blocking specs use a TSV-backed mock geo database at
 `/var/lib/homelab-ingress/mock-geo.tsv` (selected by `geoip.provider: mock`).
 It maps four `/26` slices of `10.44.0.0/24` to US, CA, EU and XX. Specs that
 need an EU source add `10.44.0.129/24` to `ns-server`'s `veth-outer` and bind
 curl with `--interface`. `BeforeSuite` rewrites the fixture atomically and
-stops/truncates/starts the in-netns dnsmasq so a kept VM starts with a clean
-91-address lease pool (an interrupted run can otherwise exhaust it).
-
-Traffic also uses fresh TCP connections (curl is invoked per request, and
-`CollectBackendIDsFreshConn` sets `DisableKeepAlives`): keep-alive reuses the
-same connection — and thus the same numgen evaluation — across requests,
-which under-counts distinct backends on round-robin rules.
-
-Rate-limit specs need many *simultaneous* new connections. `AttemptParallelFromNS`
-runs N curl processes in the background inside one `ip netns exec`, so every
-request is a distinct TCP connection from the VEPA peer. Assertions use ranges
-(`1..burst+2` successes for a flood) rather than exact counts: the token bucket
-refills while the processes start, and kernel versions differ by one on whether
-the first packet of a new element consumes a token. Scenarios wait for backend pods to be Ready
-via `WaitForBackendReady` before creating Services so a missing backend
-image fails fast with the pod's waiting reason instead of a 60s status-IP
-timeout.
+resets the in-netns dnsmasq lease pool (91 addresses), so a reused VM starts
+clean.
 
 ## Running the suite
 
@@ -115,40 +97,37 @@ e2e/
 ├── go.mod                                    standalone module `github.com/vranyes/homelab-ingress/e2e`
 ├── suite_test.go                             Ginkgo entry; BeforeSuite/AfterSuite wiring
 ├── suite_helpers_test.go                     small helpers shared across scenarios
-├── zero_lb_test.go, one_lb_test.go, ...      scenario files (all in package e2e_test)
-├── geo_block_test.go                         country allow-list, annotation flip, hot reload, isolation
-├── rate_limit_test.go                        per-client new-connection limit, refill, update, removal, isolation
+├── zero_lb_test.go, one_lb_test.go, ...      scenario files (all in package e2e_test;
+│   see matrix above for per-file coverage)
 ├── cmd/
 │   └── oidc-mock/main.go                     mock OIDC provider (RS256, embedded PEM)
 └── harness/                                  helpers imported by scenarios
     ├── vm.go                                 shell helpers, file IO, atomic writes, dnsmasq lease reset
-    ├── process.go                            Spawn / ManagedProcess lifecycle
-    ├── k8s.go                                k8s client, Service/Deployment factories, CreateLBServiceWithGeos / SetAllowedGeos
-    ├── backends.go                           DeployBackend / TearDownBackend wrappers
-    ├── backends_wait.go                      WaitForBackendReady (fail fast on ImagePullBackOff)
+    ├── process.go (+ process_test.go)        Spawn / ManagedProcess lifecycle
+    ├── k8s.go                                k8s client, Service/Deployment factories (cached backend image), CreateLBServiceWithGeos / SetAllowedGeos
+    ├── backends.go (+ backends_wait.go)        DeployBackend/TearDownBackend + WaitForBackendReady gate
     ├── oidc.go                               MintToken / WaitForOidc
     ├── token.go                              WriteToken / MutateToken / BadAudienceToken
     ├── ingress.go                            IngressConfig marshalling + WaitForIngress
     ├── controller.go                         WaitForControllerReady (log + process liveness)
-    ├── traffic.go                            CollectBackendIDsFromNS / source-bound and attempt helpers / AssertAllHit / AssertRoughlyUniform
+    ├── traffic.go (+ traffic_test.go)        CollectBackendIDsFromNS / source-bound and attempt helpers / AssertAllHit / AssertRoughlyUniform
     ├── nft.go                                (#linux) LBChains / AssertNoLBChains / AssertLBChainExists / GetGeoSet / ClassifyRules
     └── log.go                                TailFile / GrepFile / WaitForLogMatch
 ```
 
-## v1 caveats
+## Caveats
 
 - IPv6 and UDP are out of scope for v1.
-- The controller's gRPC client and the e2e harness's gRPC client are kept in separate
-  modules (`controller` and `e2e` respectively).
-  The controller has its own vendored copy of the proto stubs and the e2e harness
-  imports those (rather than the ingress module's copies) for consistency.
+- Canonical proto source is `proto/router/v1/router.proto` (both
+  `ingress`/`controller` `pkg/api/router/v1` stubs are generated from it;
+  the e2e harness imports the controller's copies).
 
 ## Known issues
 
 ### Backend image (fixed by pre-pull + readiness gate)
 
-`DeployIdenticon` (`harness/k8s.go`) creates a k8s Deployment using the
-`traefik/whoami:latest` public container image. The Lima VM's k3s runs with
+`DeployBackend` (`harness/backends.go`) creates a k8s Deployment using the
+`traefik/whoami:latest` public container image (defined in `harness/k8s.go`). The Lima VM's k3s runs with
 its own embedded containerd; if that image is not cached, pods fail with
 `ImagePullBackOff` and every traffic spec times out in
 `WaitForServiceStatusIP`.
@@ -171,37 +150,25 @@ would remove the Docker Hub dependency entirely. The traffic parser
 `traefik/whoami` `Hostname: <pod>` body format, so any replacement must
 keep that contract or update the parser in lockstep.
 
-**Smoke check while iterating:** `zero_lb` and `oidc_reject` require no
-k8s backend Deployment:
+## Iterating (smoke check)
+
+`zero_lb` and `oidc_reject` require no k8s backend Deployment:
 
 ```bash
 # Inside the VM:
 cd /root/homelab-ingress/e2e
-go test -tags=e2e -count=1 -v -run 'ZeroLB|OidcReject|ControllerRestart' ./...
+go test -tags=e2e -count=1 -v --ginkgo.focus='zero-lb|oidc rejection' ./...
 ```
 
 Always pass `-count=1`: the suite's result depends on VM and cluster state
 that `go test`'s cache cannot see, so a cached "pass" is meaningless.
 
-### Spec timing
+## Spec timing
 
-The suite has a 40-minute timeout (`-timeout=40m`). Per-spec contexts sum to
-well under that (backend readiness + status IP + traffic windows), so a fully
-green run finishes in minutes while a cascading failure still produces a
-Ginkgo report instead of a `go test` SIGKILL. All specs should complete in
-under 15 minutes on a healthy provision.
+Timeout is `-timeout=40m`; a healthy run completes in under 15 minutes.
 
 ## RPC consistency the suite pins
 
-`GetLoadBalancer` and `ListLoadBalancers` must agree: a DHCP-pending LB
-reports `assigned_ip == ""` on both; a converged LB reports the same IP on
-both. This is pinned at two levels:
-
-- Unit: `TestListLoadBalancers_BeforeDHCP` in
-  `ingress/internal/service/service_test.go`. `List` used to return the
-  literal string `"<nil>"` (`net.IP(nil).String()`) for pending LBs, which
-  the controller's IP poller (`controller/internal/controller/ip_poller.go`)
-  then wrote into Service status as a real IP. Fixed by nil-guarding `List`
-  like `Get`.
-- E2E: `grpc_list_test.go` asserts `Get` and `List` report the same
-  converged IP and that no `List` entry ever contains `"<nil>"`.
+`GetLoadBalancer` and `ListLoadBalancers` must agree: `""` when DHCP-pending,
+same IP when converged, never `"<nil>"`. Pinned by
+`TestListLoadBalancers_BeforeDHCP` (unit) and `grpc_list_test.go` (e2e).
